@@ -651,15 +651,22 @@ void loop() {
     case ADJUST_PH:
       {
         done = pHadjustment(targetpH);
+        if (done) {
+          Serial.println("pH adjustment done");
+        }
         break;
       }
     case ADJUST_TDS:
     case ADJUST_ALL:
       {
         done = TDSadjustment(targetTDS);
-        if (state == ADJUST_ALL && done) {
-          state = ADJUST_PH;
-          done = false;
+        if (done) {
+          Serial.println("TDS adjustment done");
+          if (state == ADJUST_ALL) {
+            Serial.println("Starting pH adjustment");
+            state = ADJUST_PH;
+            done = false;
+          }
         }
         break;
       }
