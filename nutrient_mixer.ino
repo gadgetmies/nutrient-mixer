@@ -77,6 +77,8 @@ const char *mqttTopic = "homeassistant/sensor/nutrient-mixer";
 ESP32MQTTClient mqttClient;
 DFRobot_PH pHsensor;
 
+void(* reset) (void) = 0;
+
 void setup() {
   acidPump.enablePin = 17;
   acidPump.directionAPin = 4;
@@ -571,6 +573,7 @@ void loop() {
         engagePump(nutrientBPump, Stopped);
         engagePump(acidPump, Stopped);
         state = IDLE;
+        reset();
       }
     case IDLE:
     default:
