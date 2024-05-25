@@ -30,6 +30,7 @@ enum State {
   EMPTY,
   FILL,
   MEASURE,
+  PLOT,
   ADJUST_PH,
   ADJUST_TDS,
   ADJUST_ALL,
@@ -505,13 +506,15 @@ void printUsage() {
   Serial.println("e # Empty tank");
   Serial.println("f # Fill tank");
   Serial.println("c # Circulate");
+  Serial.println("l 10 # Plot pH, TDS and temperature values for 10 seconds");
   Serial.println("! # Abort current operation (stop all pumps) and go to idle");
 }
 
 void loop() {
   static const byte emptyDelaySeconds = 30;
   static const byte fillDelaySeconds = 30;
-  static const byte circulateDelaySeconds = 100;
+  static const byte circulateDelaySeconds = 60;
+  static byte plotDurationSeconds = 120;
   static State state = IDLE;
   bool done = false;
 
@@ -577,6 +580,12 @@ void loop() {
           state = MEASURE;
           break;
         }
+      case 'l':
+        {
+          state = PLOT;
+          plotDurationSeconds = args.toFloat();
+          break;
+        }
       default:
         {
           Serial.println("Unknown command");
@@ -614,6 +623,29 @@ void loop() {
         float pH = measurepH(20);
         reportpH(pH);
         state = IDLE;
+        break;
+      }
+    case PLOT:
+      {
+        bool done = runCountDown(
+          plotDurationSeconds,
+          []() {},
+          []() {});
+
+        if (done) {
+          Serial.println("Stopping plotting");
+          state = IDLE;
+        }
+
+        float TDS = measureTDS();
+        reportTDS(TDS);
+        Serial.print(",");
+        float temperature = measureTemperature();
+        reportTemperature(temperature);
+        Serial.print(",");
+        float pH = measurepH(20);  //temperature);
+        reportpH(pH);
+        Serial.println();
         break;
       }
     case ADJUST_PH:
