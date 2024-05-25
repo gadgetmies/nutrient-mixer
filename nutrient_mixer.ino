@@ -1,5 +1,4 @@
 #include <CountDown.h>
-#include <DFRobot_PH.h>
 #include <WiFi.h>
 #include <CQRobotTDS.h>
 #include <ESP32MQTTClient.h>
@@ -74,8 +73,20 @@ const char *password = "YOUR_WIFI_PASSWORD";
 const char *mqttServer = "mqtt://sensorpi.local:1883";
 const char *mqttTopic = "homeassistant/sensor/nutrient-mixer";
 
+float ainToVoltage(long value) {
+  // Measured a couple of values and created the linear regression equation in Numbers (scatter plot, series->trendlines)
+  return value * 0.0008 + 0.1625;
+}
+
+float voltageToPH(float voltage) {
+  return -5.69 * voltage + 21.13;
+}
+
+float valueTopH(int value) {
+  return -0.0068 * value + 22.626;
+}
+
 ESP32MQTTClient mqttClient;
-DFRobot_PH pHsensor;
 
 void(* reset) (void) = 0;
 
@@ -115,7 +126,6 @@ void setup() {
   pinMode(TDSSensorIn, INPUT);
 
   Serial.begin(115200);
-  pHsensor.begin();
 
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
@@ -169,27 +179,64 @@ void engagePump(Pump pump, bool pumping) {
   digitalWrite(pump.relayPin, pumping ? HIGH : LOW);
 }
 
-float measurepH() {
-  static DFRobot_PH ph;
-  static const byte pHMeasureSamples = 5;
-  static const byte pHMeasureDelayMilliseconds = 100;
-  static const float temperature = 20;
+float voltageToTemperature(float voltage) {
+  return voltage;  // TODO
+}
 
-  float currentValue = 0;
-  for (byte i = 0; i < pHMeasureSamples; ++i) {
-    delay(pHMeasureDelayMilliseconds);
-    float voltage = analogRead(pHSensorIn) / 1024.0 * 3300;  // TODO: verify this applies for ESP32
-    Serial.print("pH sensor output voltage: ");
-    Serial.println(analogRead(pHSensorIn));
-    float pHValue = pHsensor.readPH(voltage, temperature);
-    Serial.print("pH sensor voltage converted value: ");
-    Serial.println(pHValue);
-    currentValue = (currentValue * (i - 1) + pHValue) / i;
+float measureTemperature() {
+  static const byte measureSamples = 5;
+  static const byte measureDelayMilliseconds = 100;
+
+  float sum = 0;
+  for (byte i = 0; i < measureSamples; ++i) {
+    delay(measureDelayMilliseconds);
+    long value = analogRead(temperatureSensorIn);
+    float voltage = ainToVoltage(value);
+    const float temperatureValue = voltage;  // TODO
+#ifdef DEBUG
+    if (i == 0) {
+      Serial.print("Temperature_output_value:");
+      Serial.print(value);
+      Serial.print(",Temperature_output_voltage:");
+      Serial.print(voltage);
+      Serial.print(",");
+    }
+#endif;
+
+    sum += voltage;
   }
 
-  Serial.print("Returning pH: ");
-  Serial.println(currentValue);
-  return currentValue;
+  return voltageToTemperature(sum / measureSamples);
+}
+
+void reportTemperature(float temperature) {
+  Serial.print("Temperature:");
+  Serial.print(temperature);
+}
+
+float measurepH(float temperature) {
+  static const byte measureSamples = 5;
+  static const byte measureDelayMilliseconds = 100;
+
+  float sum = 0;
+  for (byte i = 0; i < measureSamples; ++i) {
+    delay(measureDelayMilliseconds);
+    long value = analogRead(pHSensorIn);
+    float voltage = ainToVoltage(value);
+    #ifdef DEBUG
+    if (i == 0) {
+      Serial.print(",pH_value:");
+      Serial.print(value);
+      Serial.print(",pH_voltage:");
+      Serial.print(voltage);
+      Serial.print(",");
+    }
+    #endif
+    sum += value;
+  }
+  // pH 3.00 = 2.29
+  // pH 7.00 = 1.75
+  return valueTopH(sum / measureSamples);
 }
 
 bool runCountDown(byte delaySeconds, void (*start)(), void (*stop)()) {
@@ -235,14 +282,14 @@ bool circulate(byte delaySeconds) {
 }
 
 void reportpH(float value) {
-  Serial.print("pH: ");
-  Serial.println(value);
+  Serial.print("pH:");
+  Serial.print(value);
 }
 
 bool pHadjustment(float target) {
   static const byte pHMeasureSamples = 5;
-  static const byte pHCirculateSeconds = 20;
-  static const byte acidPumpDelaySeconds = 5;
+  static const byte pHCirculateSeconds = 40;
+  static const byte acidPumpDelaySeconds = 2;
   static const float pHthreshold = 0.1f;
   static pHadjustState state = PH_MEASURE;
   static byte adjustmentRound = 0;
@@ -253,11 +300,15 @@ bool pHadjustment(float target) {
       {
         Serial.print("Adjustment round: ");
         Serial.println(adjustmentRound);
-        float pH = measurepH();
+        Serial.print("Target: ");
+        Serial.println(target);
+        float temperature = measureTemperature();
+        float pH = measurepH(20);  // temperature);
         reportpH(pH);
+        Serial.println();
 
-        diff = pH - target;
-        if (diff < pHthreshold || adjustmentRound > 5) {
+        diff = abs(pH - target);
+        if (pH < target || diff < pHthreshold || adjustmentRound > 5) {
           adjustmentRound = 0;
           return true;
         } else {
@@ -268,7 +319,7 @@ bool pHadjustment(float target) {
       }
     case PH_PUMP:
       {
-        bool done = pumppH(round(acidPumpDelaySeconds)); // * diff));
+        bool done = pumppH(round(acidPumpDelaySeconds));  // * diff));
         if (done) state = PH_CIRCULATE;
         break;
       }
@@ -545,7 +596,7 @@ void loop() {
       {
         float TDS = measureTDS();
         reportTDS(TDS);
-        float pH = measurepH();
+        float pH = measurepH(20);
         reportpH(pH);
         state = IDLE;
         break;
