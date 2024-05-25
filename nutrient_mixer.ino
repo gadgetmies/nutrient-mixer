@@ -556,8 +556,8 @@ void loop() {
         {
           state = ADJUST_ALL;
           byte splitLocation = args.indexOf(' ');
-          targetpH = args.substring(0, splitLocation).toFloat();
-          targetTDS = args.substring(splitLocation + 1).toFloat();
+          targetTDS = args.substring(0, splitLocation).toFloat();
+          targetpH = args.substring(splitLocation + 1).toFloat();
           break;
         }
       case 'e':
