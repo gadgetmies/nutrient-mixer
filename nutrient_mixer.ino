@@ -108,8 +108,8 @@ void setup() {
   nutrientAPump.directionBPin = 19;
 
   nutrientBPump.enablePin = 22;
-  nutrientBPump.directionAPin = 18;
-  nutrientBPump.directionBPin = 19;
+  nutrientBPump.directionAPin = 18; // 3
+  nutrientBPump.directionBPin = 19; // 21
 
   inputPump.relayPin = 15;
   outputPump.relayPin = 2;
