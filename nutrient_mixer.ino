@@ -85,6 +85,14 @@ float valueTopH(int value) {
   return -0.0068 * value + 22.626;
 }
 
+float voltageToTDS(float voltage) {
+  return 395 * voltage - 39.7;
+}
+
+float valueToTDS(float value) {
+  return 395 * value - 39.7;
+}
+
 ESP32MQTTClient mqttClient;
 
 void(* reset) (void) = 0;
@@ -334,26 +342,31 @@ bool pHadjustment(float target) {
 }
 
 void reportTDS(float value) {
-  Serial.print("TDS: ");
-  Serial.println(value);
+  Serial.print("TDS:");
+  Serial.print(value);
 }
 
 float measureTDS() {
-  static CQRobotTDS tds(TDSSensorIn);
   static const byte TDSMeasureSamples = 5;
 
-  float currentValue = 0;
+  float sum = 0;
   for (byte i = 0; i < TDSMeasureSamples; ++i) {
     float temperature = 20;  // TODO: read temperature from sensor
-    Serial.print("TDS sensor output voltage: ");
-    Serial.println(analogRead(TDSSensorIn));
-    float TDS = tds.update(temperature);
-    Serial.print("TDS sensor voltage converted value: ");
-    Serial.println(TDS);
-    currentValue = (currentValue * (i - 1) + TDS) / i;
+    long value = analogRead(TDSSensorIn);
+    float voltage = ainToVoltage(value);
+#ifdef DEBUG
+    if (i == 0) {
+      Serial.print("TDS_output_value:");
+      Serial.print(value);
+      Serial.print(",TDS_output_voltage:");
+      Serial.print(voltage);
+      Serial.print(",");
+    }
+#endif
+    sum += value;
   }
 
-  return currentValue;
+  return valueToTDS(sum / TDSMeasureSamples) / 1000;
 }
 
 bool pumpNutrients(TDSadjustState &state, byte delaySeconds) {
@@ -400,8 +413,8 @@ bool pumpNutrients(TDSadjustState &state, byte delaySeconds) {
 }
 
 bool TDSadjustment(float target) {
-  static const byte TDSCirculateSeconds = 20;
-  static const byte TDSPumpDelaySeconds = 5;
+  static const byte TDSCirculateSeconds = 40;
+  static const byte TDSPumpDelaySeconds = 3;
   static float TDSThreshold = 0.1f;
   static TDSadjustState state = TDS_MEASURE;
   float diff = 0;
@@ -411,11 +424,14 @@ bool TDSadjustment(float target) {
     case TDS_MEASURE:
       {
         Serial.print("Adjustment round: ");
-        Serial.println(adjustmentRound);
+        Serial.println(adjustmentRound + 1);
+        Serial.print("Target: ");
+        Serial.println(target);
         float TDS = measureTDS();
         reportTDS(TDS);
-        diff = TDS - target;
-        if (diff < TDSThreshold || adjustmentRound > 5) {
+        Serial.println();
+        diff = abs(TDS - target);
+        if (TDS > target || diff < TDSThreshold || adjustmentRound > 5) {
           adjustmentRound = 0;
           return true;
         } else {
