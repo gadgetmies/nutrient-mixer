@@ -619,9 +619,17 @@ void loop() {
     case MEASURE:
       {
         float TDS = measureTDS();
+        Serial.println();
         reportTDS(TDS);
-        float pH = measurepH(20);
+        Serial.println();
+        float temperature = measureTemperature();
+        Serial.println();
+        reportTemperature(temperature);
+        Serial.println();
+        float pH = measurepH(20);  //temperature);
+        Serial.println();
         reportpH(pH);
+        Serial.println();
         state = IDLE;
         break;
       }
