@@ -57,8 +57,8 @@ PeristalticPump nutrientBPump;
 Pump inputPump;
 Pump outputPump;
 
-const byte pHSensorIn = 36;
-const byte temperatureSensorIn = 39;
+const byte pHSensorIn = 39;
+const byte temperatureSensorIn = 36;
 const byte TDSSensorIn = 34;
 
 float targetpH = 7;
