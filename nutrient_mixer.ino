@@ -1,6 +1,39 @@
+// Use 115200 speed for programming
+// Perhaps necessary to use v2.x of ESP32 boards https://dl.espressif.com/dl/package_esp32_index.json
+
+// TODO: The 5V on T-Display gives out just 3V for some reason
+//.      GPIO pins 38 and 39 do not seem to go up
+
+#include <KeyDetector.h>
+#include <AiEsp32RotaryEncoder.h>
+#include <Adafruit_ST7789.h>
+#include <GEM_adafruit_gfx.h>
 #include <CountDown.h>
-#include <WiFi.h>
-#include <ESP32MQTTClient.h>
+
+// BUTTON HANDLING
+const byte rightPin = 0;
+Key keys[] = {{GEM_KEY_RIGHT, rightPin}};
+KeyDetector myKeyDetector(keys, sizeof(keys)/sizeof(Key));
+
+// TFT INITIALISATION
+#define TFT_MOSI 19
+#define TFT_SCLK 18
+#define TFT_CS 5
+#define TFT_DC 16
+#define TFT_RST 23
+#define TFT_BL 4
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
+
+// GLOBAL STATE
+float targetTDS = 2;
+float targetpH = 6;
+float currentpH = 7;
+float currentTDS = 0;
+char currentpHString[17] = "-\0";
+char currentTDSString[17] = "-\0";
+bool enablePrint = false;
+char commandFromMenu = 0;
 
 enum Rotation {
   Forward,
@@ -34,6 +67,8 @@ enum State {
   ADJUST_PH,
   ADJUST_TDS,
   ADJUST_ALL,
+  PUMP_PH,
+  PUMP_NUTRIENT,
   ABORT
 };
 
@@ -57,21 +92,24 @@ PeristalticPump nutrientBPump;
 Pump inputPump;
 Pump outputPump;
 
-const byte pHSensorIn = 39;
-const byte temperatureSensorIn = 36;
-const byte TDSSensorIn = 34;
+const byte pHSensorIn = 27;
+const byte temperatureSensorIn = 26;
+const byte TDSSensorIn = 32;
 
-float targetpH = 7;
-float currentpH = 7;
+// FORWARD DECLARATIONS
+void fill();
+void empty();
+void circulate();
+void adjustAll();
+void adjustpH();
+void adjustTDS();
+void pumpA();
+void pumpB();
+void pumpAcid();
+void measure();
 
-float targetTDS = 2;
-float currentTDS = 2;
-
-const char *ssid = "YOUR_WIFI_SSID";
-const char *password = "YOUR_WIFI_PASSWORD";
-
-const char *mqttServer = "mqtt://sensorpi.local:1883";
-const char *mqttTopic = "homeassistant/sensor/nutrient-mixer";
+// UTILITY FUNCTIONS
+void (*reset)(void) = 0;
 
 float ainToVoltage(long value) {
   // Measured a couple of values and created the linear regression equation in Numbers (scatter plot, series->trendlines)
@@ -91,81 +129,152 @@ float voltageToTDS(float voltage) {
 }
 
 float valueToTDS(float value) {
-  return 395 * value - 39.7;
+  return 0.3207 * value + 116.685;
 }
 
-ESP32MQTTClient mqttClient;
-
-void(* reset) (void) = 0;
-
-void setup() {
-  acidPump.enablePin = 17;
-  acidPump.directionAPin = 4;
-  acidPump.directionBPin = 16;
-
-  nutrientAPump.enablePin = 5;
-  nutrientAPump.directionAPin = 18;
-  nutrientAPump.directionBPin = 19;
-
-  nutrientBPump.enablePin = 22;
-  nutrientBPump.directionAPin = 18; // 3
-  nutrientBPump.directionBPin = 19; // 21
-
-  inputPump.relayPin = 15;
-  outputPump.relayPin = 2;
-
-  pinMode(nutrientAPump.enablePin, OUTPUT);
-  pinMode(nutrientAPump.directionAPin, OUTPUT);
-  pinMode(nutrientAPump.directionBPin, OUTPUT);
-
-  pinMode(nutrientBPump.enablePin, OUTPUT);
-  pinMode(nutrientBPump.directionAPin, OUTPUT);
-  pinMode(nutrientBPump.directionBPin, OUTPUT);
-
-  pinMode(acidPump.enablePin, OUTPUT);
-  pinMode(acidPump.directionAPin, OUTPUT);
-  pinMode(acidPump.directionBPin, OUTPUT);
-
-  pinMode(inputPump.relayPin, OUTPUT);
-  pinMode(outputPump.relayPin, OUTPUT);
-
-  pinMode(pHSensorIn, INPUT);
-  pinMode(temperatureSensorIn, INPUT);
-  pinMode(TDSSensorIn, INPUT);
-
-  Serial.begin(115200);
-
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Connecting to WiFi..");
+bool runCountDown(byte delaySeconds, void (*start)(), void (*stop)()) {
+  static CountDown countDown;
+  static bool running = false;
+  if (!running) {
+    running = true;
+    countDown.start(delaySeconds * 1000);
+    start();
+  } else if (countDown.remaining() == 0) {
+    running = false;
+    stop();
+    return true;
   }
-  Serial.println("Connected to WiFi");
-
-  Serial.println("Connecting to MQTT");
-  mqttClient.enableDebuggingMessages();
-  mqttClient.setURI(mqttServer);
-  mqttClient.enableLastWillMessage("lwt", "I am going offline");
-  mqttClient.setKeepAlive(30);
-  mqttClient.loopStart();
-
-  printUsage();
+  return false;
 }
 
-void onConnectionEstablishedCallback(esp_mqtt_client_handle_t client) {
-  Serial.println("MQTT connection established");
-  if (mqttClient.isMyTurn(client))  // can be omitted if only one client
-  {
-    mqttClient.subscribe(mqttTopic, [](const String &payload) {
-      log_i("%s: %s", mqttTopic, payload.c_str());
-    });
+void printData() {
+  Serial.println("print data");
+  // If enablePrint flag is set to true (checkbox on screen is checked)...
+  if (enablePrint) {
+    // ...print the number to Serial
+    Serial.print("TDS target is: ");
+    Serial.println(targetTDS);
+
+    Serial.print("pH target is: ");
+    Serial.println(targetpH);
+  } else {
+    Serial.println("Printing is disabled, sorry:(");
   }
 }
 
-esp_err_t handleMQTT(esp_mqtt_event_handle_t event) {
-  Serial.println("MQTT event received");
-  mqttClient.onEventCallback(event);
-  return ESP_OK;
+void printUsage() {
+  Serial.println("Commands:");
+  Serial.println("m # Measure and report pH and TDS");
+  Serial.println("t 1000 # Adjust TDS to 1000");
+  Serial.println("p 7.0 # Adjust pH to 7.0");
+  Serial.println("a 1000 7.0 # Adjust TDS to 1000 and pH to 7.0");
+  Serial.println("e # Empty tank");
+  Serial.println("f # Fill tank");
+  Serial.println("c # Circulate");
+  Serial.println("u # Pump pH");
+  Serial.println("n # Pump nutrients");
+  Serial.println("l 10 # Plot pH, TDS and temperature values for 10 seconds");
+  Serial.println("! # Abort current operation (stop all pumps) and go to idle");
+}
+
+// MENU SETUP
+GEMPage menuPageMain("Main Menu");
+
+GEMItem pHValue("pH", currentpHString, true);
+GEMItem TDSValue("TDS", currentTDSString, true);
+
+GEMItem measureItem("Measure", measure);
+
+// PUMP
+
+GEMPage menuPagePump("Pump", menuPageMain);
+GEMItem menuItemPump("Pump", menuPagePump);
+
+GEMPage menuPageReservoir("Reservoir", menuPagePump);
+GEMItem menuItemReservoir("Reservoir", menuPageReservoir);
+
+GEMItem menuItemCirculate("Circulate", circulate);
+GEMItem menuItemFill("Fill", fill);
+GEMItem menuItemEmpty("Empty", empty);
+
+GEMPage menuPageNutrients("Nutrients", menuPagePump);
+GEMItem menuItemNutrients("Nutrients", menuPageNutrients);
+
+GEMItem menuItemPumpA("Pump A", pumpA);
+GEMItem menuItemPumpB("Pump B", pumpB);
+GEMItem menuItemPumpAcid("Pump acid", pumpAcid);
+
+// ADJUST
+
+GEMPage menuPageAdjust("Adjust", menuPageMain);
+GEMItem menuItemAdjust("Adjust", menuPageAdjust);
+
+GEMPage menuPageTarget("Target Values", menuPageAdjust);
+GEMItem menuItemTarget("Target Values", menuPageTarget);
+
+GEMItem menuItemTargetpH("Target pH:", targetpH);
+GEMItem menuItemTargetTDS("Target TDS:", targetTDS);
+
+GEMItem menuItemAdjustAll("Adjust all", adjustAll);
+GEMItem menuItemAdjustpH("Adjust pH", adjustpH);
+GEMItem menuItemAdjustTDS("Adjust TDS", adjustTDS);
+
+GEM_adafruit_gfx menu(tft, GEM_POINTER_ROW, GEM_ITEMS_COUNT_AUTO);
+
+// ROTARY ENCODER SETUP
+#define ROTARY_ENCODER_A_PIN 17
+#define ROTARY_ENCODER_B_PIN 22
+#define ROTARY_ENCODER_BUTTON_PIN 21
+
+AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(ROTARY_ENCODER_A_PIN, ROTARY_ENCODER_B_PIN, ROTARY_ENCODER_BUTTON_PIN, -1, 4, false);
+
+void rotary_onButtonClick() {
+	static unsigned long lastTimePressed = 0;
+	//ignore multiple press in that time milliseconds
+	if (millis() - lastTimePressed < 500)
+	{
+		return;
+	}
+	lastTimePressed = millis();
+	Serial.print("button pressed ");
+	Serial.print(millis());
+	Serial.println(" milliseconds after restart");
+  menu.registerKeyPress(GEM_KEY_OK);
+}
+
+void rotary_loop() {
+	//dont print anything unless value changed
+  float changed = rotaryEncoder.encoderChanged();
+	if (changed)
+	{
+    Serial.print("Changed: ");
+    Serial.println(changed);
+		Serial.print("Value: ");
+		Serial.println(rotaryEncoder.readEncoder());
+    if (changed > 0) {
+      menu.registerKeyPress(GEM_KEY_UP);
+    } else {
+      menu.registerKeyPress(GEM_KEY_DOWN);
+    }
+	}
+	if (rotaryEncoder.isEncoderButtonClicked())
+	{
+		rotary_onButtonClick();
+	}
+}
+
+void IRAM_ATTR readEncoderISR() {
+	rotaryEncoder.readEncoder_ISR();
+}
+
+void engagePump(Pump pump, bool pumping) {
+// MEASUREMENTS
+  Serial.print("Engage pump in GPIO: ");
+  Serial.println(pump.relayPin);
+  Serial.print("Set pumping to: ");
+  Serial.println(pumping);
+  pinMode(pump.relayPin, OUTPUT);
+  digitalWrite(pump.relayPin, pumping ? HIGH : LOW);
 }
 
 void engagePump(PeristalticPump pump, Rotation rotation) {
@@ -181,10 +290,6 @@ void engagePump(PeristalticPump pump, Rotation rotation) {
     }
     digitalWrite(pump.enablePin, HIGH);
   }
-}
-
-void engagePump(Pump pump, bool pumping) {
-  digitalWrite(pump.relayPin, pumping ? HIGH : LOW);
 }
 
 float voltageToTemperature(float voltage) {
@@ -209,7 +314,7 @@ float measureTemperature() {
       Serial.print(voltage);
       Serial.print(",");
     }
-#endif;
+#endif
 
     sum += voltage;
   }
@@ -231,7 +336,7 @@ float measurepH(float temperature) {
     delay(measureDelayMilliseconds);
     long value = analogRead(pHSensorIn);
     float voltage = ainToVoltage(value);
-    #ifdef DEBUG
+#ifdef DEBUG
     if (i == 0) {
       Serial.print(",pH_value:");
       Serial.print(value);
@@ -239,7 +344,7 @@ float measurepH(float temperature) {
       Serial.print(voltage);
       Serial.print(",");
     }
-    #endif
+#endif
     sum += value;
   }
   // pH 3.00 = 2.29
@@ -247,19 +352,91 @@ float measurepH(float temperature) {
   return valueTopH(sum / measureSamples);
 }
 
-bool runCountDown(byte delaySeconds, void (*start)(), void (*stop)()) {
-  static CountDown countDown;
-  static bool running = false;
-  if (!running) {
-    running = true;
-    countDown.start(delaySeconds * 1000);
-    start();
-  } else if (countDown.remaining() == 0) {
-    running = false;
-    stop();
-    return true;
+void reportpH(float value) {
+  Serial.print("pH:");
+  Serial.print(value);
+}
+
+void reportTDS(float value) {
+  Serial.print("TDS:");
+  Serial.print(value);
+}
+
+float measureTDS() {
+  static const byte TDSMeasureSamples = 5;
+
+  float sum = 0;
+  for (byte i = 0; i < TDSMeasureSamples; ++i) {
+    float temperature = 20;  // TODO: read temperature from sensor
+    long value = analogRead(TDSSensorIn);
+    float voltage = ainToVoltage(value);
+#ifdef DEBUG
+    if (i == 0) {
+      Serial.print("TDS_output_value:");
+      Serial.print(value);
+      Serial.print(",TDS_output_voltage:");
+      Serial.print(voltage);
+      Serial.print(",");
+    }
+#endif
+    sum += value;
   }
-  return false;
+
+  return valueToTDS(sum / TDSMeasureSamples);
+}
+
+// PUMP FUNCTIONS
+bool empty(byte delaySeconds) {
+  return runCountDown(
+    delaySeconds,
+    []() {
+      Serial.println("Engaging output pump");
+      engagePump(outputPump, true);
+    },
+    []() {
+      Serial.println("Stopping output pump");
+      engagePump(outputPump, false);
+    });
+}
+
+bool fill(byte delaySeconds) {
+  return runCountDown(
+    delaySeconds,
+    []() {
+      Serial.println("Engaging input pump");
+      engagePump(inputPump, true);
+    },
+    []() {
+      Serial.println("Stopping input pump");
+      engagePump(inputPump, false);
+    });
+}
+
+bool circulate(byte delaySeconds) {
+  static long counter = 0;
+
+  if (counter % 10 == 0) {
+    float TDS = measureTDS();
+    reportTDS(TDS);
+    Serial.print(",");
+    float pH = measurepH(20);
+    reportpH(pH);
+    Serial.println();
+  }
+  counter++;
+
+  return runCountDown(
+    delaySeconds, []() {
+      counter = 0;
+      Serial.println("Starting circulation");
+      engagePump(inputPump, true);
+      engagePump(outputPump, true);
+    },
+    []() {
+      Serial.println("Stopping circulation");
+      engagePump(inputPump, false);
+      engagePump(outputPump, false);
+    });
 }
 
 bool pumppH(byte durationSeconds) {
@@ -275,25 +452,50 @@ bool pumppH(byte durationSeconds) {
     });
 }
 
-bool circulate(byte delaySeconds) {
-  return runCountDown(
-    delaySeconds, []() {
-      Serial.println("Starting circulation");
-      engagePump(inputPump, true);
-      engagePump(outputPump, true);
-    },
-    []() {
-      Serial.println("Stopping circulation");
-      engagePump(inputPump, false);
-      engagePump(outputPump, false);
-    });
+bool pumpNutrients(TDSadjustState &state, byte delaySeconds) {
+  switch (state) {
+    case TDS_A_PUMP:
+      {
+        bool done = runCountDown(
+          delaySeconds,
+          []() {
+            Serial.println("Engaging TDS A pump");
+            engagePump(nutrientAPump, Forward);
+          },
+          []() {
+            Serial.println("Stopping TDS A pump");
+            engagePump(nutrientAPump, Stopped);
+          });
+
+        if (done) {
+          Serial.println("Nutrient A pumped, next B");
+          state = TDS_B_PUMP;
+        }
+        break;
+      }
+    case TDS_B_PUMP:
+      {
+        bool done = runCountDown(
+          delaySeconds,
+          []() {
+            Serial.println("Engaging TDS B pump");
+            engagePump(nutrientBPump, Forward);
+          },
+          []() {
+            Serial.println("Stopping TDS B pump");
+            engagePump(nutrientBPump, Stopped);
+          });
+        if (done) {
+          Serial.println("Nutrient B pumped, next circulate");
+          return true;
+        }
+        break;
+      }
+  }
+  return false;
 }
 
-void reportpH(float value) {
-  Serial.print("pH:");
-  Serial.print(value);
-}
-
+// ADJUSTMENT
 bool pHadjustment(float target) {
   static const byte pHMeasureSamples = 5;
   static const byte pHCirculateSeconds = 40;
@@ -342,80 +544,9 @@ bool pHadjustment(float target) {
   return false;
 }
 
-void reportTDS(float value) {
-  Serial.print("TDS:");
-  Serial.print(value);
-}
-
-float measureTDS() {
-  static const byte TDSMeasureSamples = 5;
-
-  float sum = 0;
-  for (byte i = 0; i < TDSMeasureSamples; ++i) {
-    float temperature = 20;  // TODO: read temperature from sensor
-    long value = analogRead(TDSSensorIn);
-    float voltage = ainToVoltage(value);
-#ifdef DEBUG
-    if (i == 0) {
-      Serial.print("TDS_output_value:");
-      Serial.print(value);
-      Serial.print(",TDS_output_voltage:");
-      Serial.print(voltage);
-      Serial.print(",");
-    }
-#endif
-    sum += value;
-  }
-
-  return valueToTDS(sum / TDSMeasureSamples) / 1000;
-}
-
-bool pumpNutrients(TDSadjustState &state, byte delaySeconds) {
-  switch (state) {
-    case TDS_A_PUMP:
-      {
-        bool done = runCountDown(
-          delaySeconds,
-          []() {
-            Serial.println("Engaging TDS A pump");
-            engagePump(nutrientAPump, Forward);
-          },
-          []() {
-            Serial.println("Stopping TDS A pump");
-            engagePump(nutrientAPump, Stopped);
-          });
-
-        if (done) {
-          Serial.println("Nutrient A pumped, next B");
-          state = TDS_B_PUMP;
-        }
-        break;
-      }
-    case TDS_B_PUMP:
-      {
-        bool done = runCountDown(
-          delaySeconds,
-          []() {
-            Serial.println("Engaging TDS B pump");
-            engagePump(nutrientBPump, Forward);
-          },
-          []() {
-            Serial.println("Stopping TDS B pump");
-            engagePump(nutrientBPump, Stopped);
-          });
-        if (done) {
-          Serial.println("Nutrient B pumped, next circulate");
-          return true;
-        }
-        break;
-      }
-  }
-  return false;
-}
-
-bool TDSadjustment(float target) {
+bool TDSadjustment(float target = 0) {
   static const byte TDSCirculateSeconds = 40;
-  static const byte TDSPumpDelaySeconds = 3;
+  static const byte TDSPumpDelaySeconds = 1;
   static float TDSThreshold = 0.1f;
   static TDSadjustState state = TDS_MEASURE;
   float diff = 0;
@@ -432,7 +563,7 @@ bool TDSadjustment(float target) {
         reportTDS(TDS);
         Serial.println();
         diff = abs(TDS - target);
-        if (TDS > target || diff < TDSThreshold || adjustmentRound > 5) {
+        if (target < 0.1 || TDS > target || diff < TDSThreshold || adjustmentRound > 5) {
           adjustmentRound = 0;
           return true;
         } else {
@@ -471,133 +602,275 @@ bool TDSadjustment(float target) {
   return false;
 }
 
-bool empty(byte delaySeconds) {
-  return runCountDown(
-    delaySeconds,
-    []() {
-      Serial.println("Engaging output pump");
-      engagePump(outputPump, true);
-    },
-    []() {
-      Serial.println("Stopping output pump");
-      engagePump(outputPump, false);
-    });
+// MENU HANDLERS
+void fill() {
+  commandFromMenu = 'f';
+  Serial.println("Fill");
 }
 
-bool fill(byte delaySeconds) {
-  return runCountDown(
-    delaySeconds,
-    []() {
-      Serial.println("Engaging input pump");
-      engagePump(inputPump, true);
-    },
-    []() {
-      Serial.println("Stopping input pump");
-      engagePump(inputPump, false);
-    });
+void empty() {
+  commandFromMenu = 'e';
+  Serial.println("Empty");
 }
 
-void printUsage() {
-  Serial.println("Commands:");
-  Serial.println("m # Measure and report pH and TDS");
-  Serial.println("t 2.0 # Adjust TDS to 2.0");
-  Serial.println("p 7.0 # Adjust pH to 7.0");
-  Serial.println("a 2.0 7.0 # Adjust TDS to 2.0 and pH to 7.0");
-  Serial.println("e # Empty tank");
-  Serial.println("f # Fill tank");
-  Serial.println("c # Circulate");
-  Serial.println("l 10 # Plot pH, TDS and temperature values for 10 seconds");
-  Serial.println("! # Abort current operation (stop all pumps) and go to idle");
+void circulate() {
+  commandFromMenu = 'c';
+  Serial.println("Circulate");
 }
 
+void adjustAll() {
+  Serial.println("adjust all");
+}
+
+void adjustpH() {
+  Serial.println("adjust ph");
+}
+
+void adjustTDS() {
+  Serial.println("adjust ec");
+}
+
+void pumpA() {
+  Serial.println("pump a");
+}
+
+void pumpB() {
+  Serial.println("pump b");
+}
+
+void pumpAcid() {
+  Serial.println("pump acid");
+}
+
+void measure() {
+  Serial.println("measure");
+}
+
+// SETUP
+void setupMenu() {
+  Serial.println("setup menu");
+
+    // Create GEMAppearance object with general values (that will be used for every menu page if not overridden)
+  GEMAppearance appearanceGeneral;
+  //appearanceGeneral.menuPointerType = GEM_POINTER_ROW;
+  //appearanceGeneral.menuItemsPerScreen = GEM_ITEMS_COUNT_AUTO;
+  appearanceGeneral.menuItemsPerScreen = 6;
+  appearanceGeneral.menuItemHeight = 20;
+  appearanceGeneral.menuPageScreenTopOffset = 20;
+  appearanceGeneral.menuValuesLeftOffset = 150;
+  menu.setAppearance(appearanceGeneral); // Note there is no `&` operator when setting general (or global) appearance of the menu
+
+  // Add menu items to menu page
+  pHValue.setPrecision(2);
+  TDSValue.setPrecision(2);
+  menuPageMain.addMenuItem(pHValue);
+  menuPageMain.addMenuItem(TDSValue);
+  menuPageMain.addMenuItem(measureItem);
+
+  menuPageMain.addMenuItem(menuItemPump);
+
+  menuPagePump.addMenuItem(menuItemReservoir);
+  menuPageReservoir.addMenuItem(menuItemCirculate);
+  menuPageReservoir.addMenuItem(menuItemFill);
+  menuPageReservoir.addMenuItem(menuItemEmpty);
+
+  menuPagePump.addMenuItem(menuItemNutrients);
+  menuPageNutrients.addMenuItem(menuItemPumpA);
+  menuPageNutrients.addMenuItem(menuItemPumpB);
+  menuPageNutrients.addMenuItem(menuItemPumpAcid);
+
+  menuPageMain.addMenuItem(menuItemAdjust);
+  menuPageAdjust.addMenuItem(menuItemTarget);
+  menuPageAdjust.addMenuItem(menuItemAdjustAll);
+  menuPageAdjust.addMenuItem(menuItemAdjustpH);
+  menuPageAdjust.addMenuItem(menuItemAdjustTDS);
+
+  menuItemTargetpH.setPrecision(2);
+  menuItemTargetTDS.setPrecision(2);
+  menuPageTarget.addMenuItem(menuItemTargetpH);
+  menuPageTarget.addMenuItem(menuItemTargetTDS);
+
+  // Add menu page to menu and set it as current
+  menu.setMenuPageCurrent(menuPageMain);
+  
+  menu.setTextSize(2);
+
+  menu.invertKeysDuringEdit();
+}
+
+void setup() {
+  acidPump.enablePin = 12;
+  acidPump.directionAPin = 33;
+  acidPump.directionBPin = 25;
+
+  nutrientAPump.enablePin = 15;
+  nutrientAPump.directionAPin = 33;
+  nutrientAPump.directionBPin = 25;
+
+  nutrientBPump.enablePin = 2;
+  nutrientBPump.directionAPin = 33;  // 3
+  nutrientBPump.directionBPin = 25;  // 21
+
+  inputPump.relayPin = 39;
+  outputPump.relayPin = 38;
+
+  pinMode(nutrientAPump.enablePin, OUTPUT);
+  pinMode(nutrientAPump.directionAPin, OUTPUT);
+  pinMode(nutrientAPump.directionBPin, OUTPUT);
+
+  pinMode(nutrientBPump.enablePin, OUTPUT);
+  pinMode(nutrientBPump.directionAPin, OUTPUT);
+  pinMode(nutrientBPump.directionBPin, OUTPUT);
+
+  pinMode(acidPump.enablePin, OUTPUT);
+  pinMode(acidPump.directionAPin, OUTPUT);
+  pinMode(acidPump.directionBPin, OUTPUT);
+
+  pinMode(inputPump.relayPin, OUTPUT);
+  pinMode(outputPump.relayPin, OUTPUT);
+  digitalWrite(inputPump.relayPin, HIGH);
+  digitalWrite(outputPump.relayPin, HIGH);
+
+  pinMode(pHSensorIn, INPUT);
+  pinMode(temperatureSensorIn, INPUT);
+  pinMode(TDSSensorIn, INPUT);
+
+  pinMode(rightPin, INPUT_PULLUP);
+  Serial.begin(115200);
+  tft.init(240, 135);
+  pinMode(TFT_BL, OUTPUT);      // TTGO T-Display enable Backlight pin 4
+  digitalWrite(TFT_BL, HIGH);   // T-Display turn on Backlight
+  tft.init(135, 240);           // Initialize ST7789 240x135
+  tft.setRotation(1);
+  menu.init();
+  setupMenu();
+  menu.drawMenu();
+
+  rotaryEncoder.begin();
+	rotaryEncoder.setup(readEncoderISR);
+	rotaryEncoder.setBoundaries(0, 1000, true);
+}
+
+// LOOP
 void loop() {
-  static const byte emptyDelaySeconds = 30;
-  static const byte fillDelaySeconds = 30;
-  static const byte circulateDelaySeconds = 60;
+  // If menu is ready to accept button press...
+  if (menu.readyForKey()) {
+    // ...detect key press using KeyDetector library
+    myKeyDetector.detect();
+    // Pass pressed button to menu
+    // (pressed button ID is stored in trigger property of KeyDetector object)
+    menu.registerKeyPress(myKeyDetector.trigger);
+  }
+
+  rotary_loop();
+
+  static const byte emptyDelaySeconds = 10;
+  static const byte fillDelaySeconds = 10;
+  static const byte circulateDelaySeconds = 10;
   static byte plotDurationSeconds = 120;
   static State state = IDLE;
   bool done = false;
 
+  char command = 0;
+  String args;
+
   if (Serial.available() > 0) {
     String incoming = Serial.readString();
     incoming.trim();
-    char command = incoming[0];
-    String args = incoming.substring(2, incoming.length());
+    command = incoming[0];
+    args = incoming.substring(2, incoming.length());
     Serial.print("Received command: ");
     Serial.println(command);
 
     if (state != IDLE && command != '!') {
       Serial.println("Operation in progress. Cannot run command. Please wait for previous command to finish or abort with '!'");
     }
+  }
 
-    switch (command) {
-      case '?':
-        {
-          printUsage();
-          break;
-        }
-      case 't':
-        {
-          targetTDS = args.toFloat();
-          Serial.print("Starting TDS adjustment with target: ");
-          Serial.println(targetTDS);
-          state = ADJUST_TDS;
-          break;
-        }
-      case 'p':
-        {
-          targetpH = args.toFloat();
-          Serial.print("Starting pH adjustment with target: ");
-          Serial.println(targetpH);
-          state = ADJUST_PH;
-          break;
-        }
-      case 'a':
-        {
-          state = ADJUST_ALL;
-          byte splitLocation = args.indexOf(' ');
-          targetTDS = args.substring(0, splitLocation).toFloat();
-          targetpH = args.substring(splitLocation + 1).toFloat();
-          break;
-        }
-      case 'e':
-        {
-          state = EMPTY;
-          break;
-        }
-      case 'f':
-        {
-          state = FILL;
-          break;
-        }
-      case 'c':
-        {
-          state = CIRCULATE;
-          break;
-        }
-      case 'm':
-        {
-          state = MEASURE;
-          break;
-        }
-      case 'l':
-        {
-          state = PLOT;
-          plotDurationSeconds = args.toFloat();
-          break;
-        }
-      default:
-        {
-          Serial.println("Unknown command");
-          break;
-        }
-      case '!':
-        {
-          Serial.println("Abort!");
-          state = ABORT;
-          break;
-        }
-    }
+  if (commandFromMenu != 0) {
+    command = commandFromMenu;
+    commandFromMenu = 0;
+  }
+
+  switch (command) {
+    case 0:
+      break;
+    case '?':
+      {
+        printUsage();
+        break;
+      }
+    case 't':
+      {
+        targetTDS = args.toFloat();
+        Serial.print("Starting TDS adjustment with target: ");
+        Serial.println(targetTDS);
+        state = ADJUST_TDS;
+        break;
+      }
+    case 'p':
+      {
+        targetpH = args.toFloat();
+        Serial.print("Starting pH adjustment with target: ");
+        Serial.println(targetpH);
+        state = ADJUST_PH;
+        break;
+      }
+    case 'a':
+      {
+        state = ADJUST_ALL;
+        byte splitLocation = args.indexOf(' ');
+        targetTDS = args.substring(0, splitLocation).toFloat();
+        targetpH = args.substring(splitLocation + 1).toFloat();
+        break;
+      }
+    case 'e':
+      {
+        state = EMPTY;
+        break;
+      }
+    case 'f':
+      {
+        state = FILL;
+        break;
+      }
+    case 'c':
+      {
+        state = CIRCULATE;
+        break;
+      }
+    case 'n':
+      {
+        state = PUMP_NUTRIENT;
+        break;
+      }
+    case 'u':
+      {
+        state = PUMP_PH;
+        break;
+      }
+    case 'm':
+      {
+        state = MEASURE;
+        break;
+      }
+    case 'l':
+      {
+        state = PLOT;
+        plotDurationSeconds = args.toFloat();
+        break;
+      }
+    default:
+      {
+        Serial.println("Unknown command");
+        break;
+      }
+    case '!':
+      {
+        Serial.println("Abort!");
+        state = ABORT;
+        break;
+      }
   }
 
   switch (state) {
@@ -678,6 +951,19 @@ void loop() {
         }
         break;
       }
+    case PUMP_PH:
+      {
+        bool done = pumppH(2);
+        if (done) state = CIRCULATE;
+        break;
+      }
+    case PUMP_NUTRIENT:
+      {
+        bool done = TDSadjustment();
+        if (done) state = CIRCULATE;
+        break;
+      }
+
     case ABORT:
       {
         engagePump(inputPump, false);
@@ -687,6 +973,7 @@ void loop() {
         engagePump(acidPump, Stopped);
         state = IDLE;
         reset();
+        break;
       }
     case IDLE:
     default:
@@ -697,48 +984,3 @@ void loop() {
 
   if (done) state = IDLE;
 }
-
-/*
-#define MQTT_DEVICE_NAME "watering_station_%s/"
-#define MQTT_MOISTURE_SENSOR_PREFIX MQTT_DEVICE_NAME "moisture_"
-#define HOMEASSISTANT_SENSOR_TOPIC_PREFIX "homeassistant/sensor/"
-#define MQTT_WATER_TANK_SENSOR_NAME MQTT_DEVICE_NAME "water_tank_"
-#define MQTT_WATER_TANK_SENSOR_TOPIC HOMEASSISTANT_SENSOR_TOPIC_PREFIX MQTT_WATER_TANK_SENSOR_NAME
-#define MQTT_RELAY_PREFIX MQTT_DEVICE_NAME "relay_"
-
-const char waterTankConfigTopicTemplate[] = MQTT_WATER_TANK_SENSOR_TOPIC "/config";
-  const char waterTankConfigValueTemplate[] = "{\"name\": \"Water tank level\", \"~\": \"" MQTT_WATER_TANK_SENSOR_TOPIC "\", \"stat_t\": \"~/state\", \"value_template\": \"{{ value_json.level}}\", \"unit_of_meas\": \"%%\"}";
-  char waterTankConfigTopic[sizeof(waterTankConfigTopicTemplate) + MAC_ADDRESS_LENGTH] = "";
-  sprintf(waterTankConfigTopic, waterTankConfigTopicTemplate, macAddress);
-  char waterTankConfigValue[sizeof(waterTankConfigValueTemplate) + MAC_ADDRESS_LENGTH] = "";
-  sprintf(waterTankConfigValue, waterTankConfigValueTemplate, macAddress);
-  client.publish(waterTankConfigTopic, waterTankConfigValue, true);
-
-  const char relayConfigTopicTemplate[] = "homeassistant/switch/" MQTT_RELAY_PREFIX "%u/config";
-  const char relayConfigValueTemplate[] = "{\"name\": \"Water pump %u\", \"~\": \"homeassistant/switch/" MQTT_RELAY_PREFIX "%u\", \"state_topic\": \"~/state\", \"cmd_t\": \"~/set\", \"payload_on\": \"ON\", \"payload_off\": \"OFF\"}";
-  const char relayCommandTopicTemplate[] = "homeassistant/switch/" MQTT_RELAY_PREFIX "%u/set";
-  const char relayStateTopicTemplate[] = "homeassistant/switch/" MQTT_RELAY_PREFIX "%u/state";
-  for (byte i = 1; i <= RELAY_PIN_COUNT; ++i) {
-    char relayConfigTopic[sizeof(relayConfigTopicTemplate) + (MAC_ADDRESS_LENGTH * 2)] = "";
-    sprintf(relayConfigTopic, relayConfigTopicTemplate, macAddress, i);
-    char relayConfigValue[sizeof(relayConfigValueTemplate) + MAC_ADDRESS_LENGTH * 2] = "";
-    sprintf(relayConfigValue, relayConfigValueTemplate, i, macAddress, i);
-
-    client.publish(
-      relayConfigTopic,
-      relayConfigValue,
-      true
-    );
-
-    char commandTopic[sizeof(relayCommandTopicTemplate) + MAC_ADDRESS_LENGTH];
-    sprintf(commandTopic, relayCommandTopicTemplate, macAddress, i);
-    char stateTopic[sizeof(relayStateTopicTemplate) + MAC_ADDRESS_LENGTH];
-    sprintf(stateTopic, relayStateTopicTemplate, macAddress, i);
-    
-    client.subscribe(commandTopic, [i, stateTopic](const String& message) {
-      const boolean setOn = message == "ON";
-      setRelayState(i, setOn);
-      client.publish(stateTopic, setOn ? "ON" : "OFF", true);
-    });
-  }
-  */
