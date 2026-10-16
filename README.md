@@ -4,6 +4,17 @@ Implemented for ESP32 Devkit (v1?) / TTGO T-Display. Requires v2.x of the ESP32 
 
 Send `?` over serial (115200 baud) to list the commands.
 
+## WiFi
+
+There are no network credentials in the code. When no network has been configured, the device starts a hotspot
+named `Mixer-XXXX`. Its password is generated on first boot and shown on the WiFi menu page (and printed to
+serial). Connect to the hotspot, open http://192.168.4.1 if the setup page does not open by itself, choose the
+network and enter its password. The credentials are stored in the ESP32's flash.
+
+With a configured network the device keeps reconnecting in the background instead of opening the hotspot.
+To change the network, use WiFi > Forget WiFi in the menu or send `w reset`. Requires the WiFiManager library
+(tzapu, 2.0 or newer).
+
 ## Sensors
 
 The pH and TDS sensors are powered through the shift register, one at a time so that the probes do not

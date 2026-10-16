@@ -11,6 +11,8 @@
 #include <GEM_adafruit_gfx.h>
 #include <Preferences.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
 #include <ph4502c_sensor.h>
 
 // BUTTON HANDLING
@@ -203,6 +205,7 @@ void pumpB();
 void pumpAcid();
 void measure();
 void abortFromMenu();
+void forgetWifiFromMenu();
 
 // UTILITY FUNCTIONS
 
@@ -274,6 +277,8 @@ void printUsage() {
   Serial.println("k tds 707 # Calibrate TDS with the probe in a 707 ppm solution (below 100 ppm sets the low point)");
   Serial.println("k reset # Restore default calibration");
   Serial.println("1 # Read pH with the PH4502C library");
+  Serial.println("w # Show WiFi status");
+  Serial.println("w reset # Forget the WiFi network and start the setup hotspot");
   Serial.println("! # Abort current operation (stop all pumps) and go to idle");
 }
 
@@ -287,6 +292,21 @@ GEMItem menuItemTargetPh("Target pH:", targetPh, onTargetChanged);
 GEMItem menuItemTargetTds("Target TDS:", targetTds, onTargetChanged);
 GEMItem menuItemAdjustAll("Start auto adjust", adjustAll);
 GEMItem menuItemStop("Abort", abortFromMenu);
+
+// WIFI
+char wifiStateString[17] = "-";
+char wifiNameString[17] = "-";
+char wifiPasswordString[17] = "-";
+char wifiAddressString[17] = "-";
+
+GEMPage menuPageWifi("WiFi", menuPageMain);
+GEMItem menuItemWifi("WiFi", menuPageWifi);
+GEMItem menuItemWifiState("State", wifiStateString, true);
+GEMItem menuItemWifiName("Net", wifiNameString, true);
+GEMItem menuItemWifiPassword("Pass", wifiPasswordString, true);
+GEMItem menuItemWifiAddress("IP", wifiAddressString, true);
+GEMItem menuItemForgetWifi("Forget WiFi", forgetWifiFromMenu);
+GEMAppearance wifiAppearance;
 
 GEMSpinner doseSpinner(GEMSpinnerBoundariesByte{ 1, 1, 30 });
 GEMSpinner reservoirTimeSpinner(GEMSpinnerBoundariesInt{ 5, 5, 600 });
@@ -766,11 +786,15 @@ void formatMeasurement(char *target, float value) {
   }
 }
 
-// Only the main page shows the measurements, so other pages are not redrawn when the values change
-void redrawMenu() {
-  if (menu.getCurrentMenuPage() == &menuPageMain && menu.readyForKey() && !menu.isEditMode()) {
+// Redraws only if the page showing the changed values is open, so other pages are not slowed down
+void redrawMenuIfShowing(GEMPage &page) {
+  if (menu.getCurrentMenuPage() == &page && menu.readyForKey() && !menu.isEditMode()) {
     menu.drawMenu();
   }
+}
+
+void redrawMenu() {
+  redrawMenuIfShowing(menuPageMain);
 }
 
 void reportPh(float value) {
@@ -1158,6 +1182,11 @@ void abortFromMenu() {
   Serial.println("stop");
 }
 
+void forgetWifiFromMenu() {
+  commandFromMenu = "w reset";
+  Serial.println("forget wifi");
+}
+
 // SETUP
 void setupMenu() {
   Serial.println("setup menu");
@@ -1183,7 +1212,18 @@ void setupMenu() {
   menuPageMain.addMenuItem(menuItemAdjustAll);
   menuPageMain.addMenuItem(menuItemPump);
   menuPageMain.addMenuItem(menuItemReservoir);
+  menuPageMain.addMenuItem(menuItemWifi);
   menuPageMain.addMenuItem(menuItemStop);
+
+  // Short titles and a narrow title column so that the network names and addresses fit
+  wifiAppearance = appearanceGeneral;
+  wifiAppearance.menuValuesLeftOffset = 78;
+  menuPageWifi.setAppearance(&wifiAppearance);
+  menuPageWifi.addMenuItem(menuItemWifiState);
+  menuPageWifi.addMenuItem(menuItemWifiName);
+  menuPageWifi.addMenuItem(menuItemWifiPassword);
+  menuPageWifi.addMenuItem(menuItemWifiAddress);
+  menuPageWifi.addMenuItem(menuItemForgetWifi);
 
   menuPagePump.addMenuItem(menuItemPumpAcidPage);
   menuPagePumpAcid.addMenuItem(menuItemPumpAcid);
@@ -1275,6 +1315,8 @@ void setup() {
   rotaryEncoder.setup(readEncoderISR);
   rotaryEncoder.setBoundaries(0, 1000, true);
 
+  setupWifi();
+
   Serial.println("setup done");
 }
 
@@ -1294,6 +1336,137 @@ void startOperation(State newState) {
   stopMeasuring();
   resetAdjustments();
   state = newState;
+}
+
+// WIFI
+// There are no network credentials in the code. Without saved credentials the device starts a setup hotspot
+// with a web page for choosing the network and entering its password (WiFiManager). The credentials are
+// saved by the ESP32 in its WiFi flash storage. With saved credentials the device only connects as a
+// client and keeps reconnecting in the background, so it does not open a hotspot when e.g. the router restarts.
+// Use "Forget WiFi" (or "w reset") to change the network.
+WiFiManager wifiManager;
+char hotspotName[17];
+char hotspotPassword[9];
+
+// The hotspot password is generated on first boot and stored so that it stays the same. It is shown on the
+// WiFi menu page and printed to serial while the hotspot is running.
+void loadHotspotPassword() {
+  preferences.begin("mixer", false);
+  String password = preferences.getString("apPassword", "");
+  if (password.length() != 8) {
+    // Without similar looking characters to make it easy to type. esp_random() is a true random number
+    // generator once the radio is on (WiFi.mode() has been called).
+    static const char characters[] = "abcdefghjkmnpqrstuvwxyz23456789";
+    password = "";
+    for (byte i = 0; i < 8; ++i) {
+      password += characters[esp_random() % (sizeof(characters) - 1)];
+    }
+    preferences.putString("apPassword", password);
+  }
+  preferences.end();
+  strlcpy(hotspotPassword, password.c_str(), sizeof(hotspotPassword));
+}
+
+void startHotspot() {
+  Serial.print("WiFi not configured. Connect to hotspot ");
+  Serial.print(hotspotName);
+  Serial.print(" with password ");
+  Serial.print(hotspotPassword);
+  Serial.println(" and open http://192.168.4.1 to select the network");
+  wifiManager.startConfigPortal(hotspotName, hotspotPassword);
+}
+
+void setupWifi() {
+  WiFi.mode(WIFI_STA);
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  snprintf(hotspotName, sizeof(hotspotName), "Mixer-%02X%02X", mac[4], mac[5]);
+  loadHotspotPassword();
+
+#ifndef DEBUG
+  wifiManager.setDebugOutput(false);
+#endif
+  wifiManager.setConfigPortalBlocking(false);
+  wifiManager.setTitle("Nutrient mixer");
+  wifiManager.setHostname("nutrient-mixer");
+  // Only network setup is offered in the portal. The default menu also allows e.g. firmware updates, and
+  // "exit" would close the hotspot without a network to connect to.
+  static const char *portalMenu[] = { "wifi" };
+  wifiManager.setMenu(portalMenu, 1);
+  wifiManager.setConnectTimeout(15);
+  // Connecting to the new network blocks the loop for up to the connect timeout, so nothing may be pumping then
+  wifiManager.setPreSaveConfigCallback([]() {
+    if (state != IDLE) {
+      Serial.println("Stopping the current operation to connect to WiFi");
+      abortOperation();
+    }
+  });
+  wifiManager.setSaveConfigCallback([]() {
+    Serial.println("WiFi configured");
+  });
+
+  if (wifiManager.getWiFiIsSaved()) {
+    Serial.print("Connecting to WiFi network ");
+    Serial.println(wifiManager.getWiFiSSID());
+    WiFi.setAutoReconnect(true);
+    WiFi.begin();
+  } else {
+    startHotspot();
+  }
+}
+
+void forgetWifi() {
+  Serial.println("Forgetting WiFi network");
+  if (wifiManager.getConfigPortalActive()) {
+    wifiManager.stopConfigPortal();
+  }
+  wifiManager.resetSettings();
+  startHotspot();
+}
+
+bool updateString(char *target, const char *value) {
+  if (strncmp(target, value, 16) == 0) return false;
+  strlcpy(target, value, 17);
+  return true;
+}
+
+// Updates the WiFi menu page once a second and reports changes to serial
+void updateWifiStatus(bool force = false) {
+  static unsigned long lastUpdateAt = 0;
+  if (!force && millis() - lastUpdateAt < 1000) return;
+  lastUpdateAt = millis();
+
+  const char *wifiState;
+  String name;
+  String password = "-";
+  String address = "-";
+  if (wifiManager.getConfigPortalActive()) {
+    wifiState = "Hotspot";
+    name = hotspotName;
+    password = hotspotPassword;
+    address = WiFi.softAPIP().toString();
+  } else if (WiFi.status() == WL_CONNECTED) {
+    wifiState = "Connected";
+    name = WiFi.SSID();
+    address = WiFi.localIP().toString();
+  } else {
+    wifiState = "Connecting";
+    name = wifiManager.getWiFiSSID();
+  }
+
+  bool changed = updateString(wifiStateString, wifiState);
+  changed |= updateString(wifiNameString, name.c_str());
+  changed |= updateString(wifiPasswordString, password.c_str());
+  changed |= updateString(wifiAddressString, address.c_str());
+  if (!changed && !force) return;
+
+  Serial.print("WiFi: ");
+  Serial.print(wifiStateString);
+  Serial.print(" ");
+  Serial.print(wifiNameString);
+  Serial.print(" ");
+  Serial.println(wifiAddressString);
+  redrawMenuIfShowing(menuPageWifi);
 }
 
 bool parsePhTarget(const String &args) {
@@ -1337,7 +1510,7 @@ void handleCommand(String incoming) {
   Serial.print("Received command: ");
   Serial.println(incoming);
 
-  if (state != IDLE && command != '!' && command != '?') {
+  if (state != IDLE && command != '!' && command != '?' && command != 'w') {
     Serial.println("Operation in progress. Cannot run command. Please wait for previous command to finish or abort with '!'");
     return;
   }
@@ -1452,6 +1625,18 @@ void handleCommand(String incoming) {
         calibrate(args);
         break;
       }
+    case 'w':
+      {
+        args.toLowerCase();
+        if (args == "reset") {
+          forgetWifi();
+        } else if (args.length() > 0) {
+          Serial.println("Usage: w / w reset");
+          break;
+        }
+        updateWifiStatus(true);
+        break;
+      }
     case '!':
       {
         Serial.println("Abort!");
@@ -1498,6 +1683,9 @@ void loop() {
   rotary_loop();
 
   updatePumps();
+
+  wifiManager.process();
+  updateWifiStatus();
 
   if (Serial.available() > 0) {
     handleCommand(Serial.readStringUntil('\n'));
