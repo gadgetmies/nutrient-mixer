@@ -35,7 +35,7 @@ const byte phSensorIn = 36;
 const byte temperatureSensorIn = 39;
 const byte tdsSensorIn = 32;
 
-// Float switches pull the pin low when triggered. GPIO 34-39 have no internal pull ups, so external ones are needed.
+// Float switches pull the pin low when triggered (pull ups R7 and R8 on the board)
 const byte mixerFloatSensor = 38;
 const byte reservoirFloatSensor = 37;
 
@@ -65,10 +65,16 @@ const byte TDS_ON = 7;
 const byte PH_ON = 0;
 
 // GLOBAL STATE
+// Settings editable in the menu. They are saved in flash (see saveSettings()).
 float targetTds = 1000;
 float targetPh = 6;
-float currentPh = 7;
-float currentTds = 0;
+byte acidPumpSeconds = 2;  // Also the dose per pH adjustment round
+byte nutrientAPumpSeconds = 1;  // Also the dose per TDS adjustment round
+byte nutrientBPumpSeconds = 1;
+int emptySeconds = 10;
+int fillSeconds = 10;
+int circulateManuallySeconds = 10;
+
 char currentPhString[17] = "-";
 char currentTdsString[17] = "-";
 bool enablePrint = false;
@@ -190,8 +196,8 @@ void fill();
 void empty();
 void circulate();
 void adjustAll();
-void adjustPh();
-void adjustTds();
+void saveSettings();
+void onTargetChanged();
 void pumpA();
 void pumpB();
 void pumpAcid();
@@ -271,52 +277,59 @@ void printUsage() {
   Serial.println("! # Abort current operation (stop all pumps) and go to idle");
 }
 
-// MENU SETUP
+// MENU SETUP (structure from menu.txt)
 GEMPage menuPageMain("Main Menu");
 
+GEMItem measureItem("Measure", measure);
 GEMItem pHValue("pH", currentPhString, true);
 GEMItem TDSValue("TDS", currentTdsString, true);
+GEMItem menuItemTargetPh("Target pH:", targetPh, onTargetChanged);
+GEMItem menuItemTargetTds("Target TDS:", targetTds, onTargetChanged);
+GEMItem menuItemAdjustAll("Start auto adjust", adjustAll);
+GEMItem menuItemStop("Abort", abortFromMenu);
 
-GEMItem measureItem("Measure", measure);
-GEMItem menuItemStop("Stop", abortFromMenu);
+GEMSpinner doseSpinner(GEMSpinnerBoundariesByte{ 1, 1, 30 });
+GEMSpinner reservoirTimeSpinner(GEMSpinnerBoundariesInt{ 5, 5, 600 });
 
-// PUMP
+// PUMP (peristaltic pumps)
 
 GEMPage menuPagePump("Pump", menuPageMain);
 GEMItem menuItemPump("Pump", menuPagePump);
 
-GEMPage menuPageReservoir("Reservoir", menuPagePump);
+GEMPage menuPagePumpAcid("pH", menuPagePump);
+GEMItem menuItemPumpAcidPage("pH", menuPagePumpAcid);
+GEMItem menuItemPumpAcid("Pump", pumpAcid);
+GEMItem menuItemAcidAmount("Amount (s):", acidPumpSeconds, doseSpinner, saveSettings);
+
+GEMPage menuPagePumpA("A", menuPagePump);
+GEMItem menuItemPumpAPage("A", menuPagePumpA);
+GEMItem menuItemPumpA("Pump", pumpA);
+GEMItem menuItemAAmount("Amount (s):", nutrientAPumpSeconds, doseSpinner, saveSettings);
+
+GEMPage menuPagePumpB("B", menuPagePump);
+GEMItem menuItemPumpBPage("B", menuPagePumpB);
+GEMItem menuItemPumpB("Pump", pumpB);
+GEMItem menuItemBAmount("Amount (s):", nutrientBPumpSeconds, doseSpinner, saveSettings);
+
+// RESERVOIR (relay pumps)
+
+GEMPage menuPageReservoir("Reservoir", menuPageMain);
 GEMItem menuItemReservoir("Reservoir", menuPageReservoir);
 
-GEMItem menuItemCirculate("Circulate", circulate);
-GEMItem menuItemFill("Fill", fill);
+GEMPage menuPageEmpty("Empty", menuPageReservoir);
+GEMItem menuItemEmptyPage("Empty", menuPageEmpty);
 GEMItem menuItemEmpty("Empty", empty);
+GEMItem menuItemEmptyTime("Time (s):", emptySeconds, reservoirTimeSpinner, saveSettings);
 
-GEMPage menuPageNutrients("Nutrients", menuPagePump);
-GEMItem menuItemNutrients("Nutrients", menuPageNutrients);
+GEMPage menuPageFill("Fill", menuPageReservoir);
+GEMItem menuItemFillPage("Fill", menuPageFill);
+GEMItem menuItemFill("Fill", fill);
+GEMItem menuItemFillTime("Time (s):", fillSeconds, reservoirTimeSpinner, saveSettings);
 
-GEMItem menuItemPumpA("Pump A", pumpA);
-GEMItem menuItemPumpB("Pump B", pumpB);
-GEMItem menuItemPumpAcid("Pump acid", pumpAcid);
-
-// ADJUST
-
-GEMPage menuPageAdjust("Adjust", menuPageMain);
-GEMItem menuItemAdjust("Adjust", menuPageAdjust);
-
-GEMPage menuPageTarget("Target Values", menuPageAdjust);
-GEMItem menuItemTarget("Target Values", menuPageTarget);
-
-GEMItem menuItemTargetPh("Target pH:", targetPh);
-GEMItem menuItemTargetTds("Target TDS:", targetTds);
-
-GEMItem menuItemAdjustAll("Adjust all", adjustAll);
-GEMItem menuItemAdjustPh("Adjust pH", adjustPh);
-GEMItem menuItemAdjustTds("Adjust TDS", adjustTds);
-
-GEMPage menuPageAdjusting("Adjusting", menuPageAdjust);
-GEMItem menuItemCurrentPh("Current pH:", currentPh, true);
-GEMItem menuItemCurrentTds("Current TDS:", currentTds, true);
+GEMPage menuPageCirculate("Circulate", menuPageReservoir);
+GEMItem menuItemCirculatePage("Circulate", menuPageCirculate);
+GEMItem menuItemCirculate("Circulate", circulate);
+GEMItem menuItemCirculateTime("Time (s):", circulateManuallySeconds, reservoirTimeSpinner, saveSettings);
 
 GEM_adafruit_gfx menu(tft, GEM_POINTER_ROW, GEM_ITEMS_COUNT_AUTO);
 
@@ -473,7 +486,8 @@ bool sensorReady(Sensor sensor) {
 // - readings that are saturated or too noisy (e.g. a disconnected probe) are rejected (NAN)
 const byte sensorSampleCount = 32;
 const byte sensorSampleIntervalMilliseconds = 10;
-const float sensorMaxMilliVolts = 3100;       // ADC saturates around here with 11 dB attenuation
+// The sensor outputs reach the ADC through 10k/20k dividers (2/3 of the sensor output voltage)
+const float sensorMaxMilliVolts = 3100;       // ADC saturates around here with 11 dB attenuation (4.65 V at the sensor)
 const float sensorMaxSpreadMilliVolts = 100;  // Max spread of the middle half of the samples
 
 // Sampling is spread over loop() iterations (one sample per call) so that the UI stays responsive while measuring
@@ -584,6 +598,11 @@ const float tdsCalibrationSplit = 100;
 
 const float minCalibrationMilliVoltsDifference = 30;
 
+const float minTargetPh = 4;
+const float maxTargetPh = 8;
+const float minTargetTds = 1;
+const float maxTargetTds = 3000;
+
 Calibration phCalibration = defaultPhCalibration;
 Calibration tdsCalibration = defaultTdsCalibration;
 Preferences preferences;
@@ -622,6 +641,46 @@ void saveCalibrations() {
   preferences.putBytes("pHCal", &phCalibration, sizeof(phCalibration));
   preferences.putBytes("TDSCal", &tdsCalibration, sizeof(tdsCalibration));
   preferences.end();
+}
+
+// SETTINGS
+void saveSettings() {
+  preferences.begin("mixer", false);
+  preferences.putFloat("targetPh", targetPh);
+  preferences.putFloat("targetTds", targetTds);
+  preferences.putUChar("acidSeconds", acidPumpSeconds);
+  preferences.putUChar("aSeconds", nutrientAPumpSeconds);
+  preferences.putUChar("bSeconds", nutrientBPumpSeconds);
+  preferences.putInt("emptySeconds", emptySeconds);
+  preferences.putInt("fillSeconds", fillSeconds);
+  preferences.putInt("circSeconds", circulateManuallySeconds);
+  preferences.end();
+}
+
+// Keeps the targets in the same ranges that are accepted from serial
+void constrainTargets() {
+  targetPh = constrain(targetPh, minTargetPh, maxTargetPh);
+  targetTds = constrain(targetTds, minTargetTds, maxTargetTds);
+}
+
+void loadSettings() {
+  preferences.begin("mixer", true);
+  targetPh = preferences.getFloat("targetPh", targetPh);
+  targetTds = preferences.getFloat("targetTds", targetTds);
+  acidPumpSeconds = constrain(preferences.getUChar("acidSeconds", acidPumpSeconds), 1, 30);
+  nutrientAPumpSeconds = constrain(preferences.getUChar("aSeconds", nutrientAPumpSeconds), 1, 30);
+  nutrientBPumpSeconds = constrain(preferences.getUChar("bSeconds", nutrientBPumpSeconds), 1, 30);
+  emptySeconds = constrain(preferences.getInt("emptySeconds", emptySeconds), 5, 600);
+  fillSeconds = constrain(preferences.getInt("fillSeconds", fillSeconds), 5, 600);
+  circulateManuallySeconds = constrain(preferences.getInt("circSeconds", circulateManuallySeconds), 5, 600);
+  preferences.end();
+  constrainTargets();
+}
+
+void onTargetChanged() {
+  constrainTargets();
+  saveSettings();
+  menu.drawMenu();  // Shows the constrained values
 }
 
 bool addCalibrationPoint(Calibration &calibration, bool lowPoint, float value, float milliVolts) {
@@ -717,7 +776,6 @@ void redrawMenu() {
 void reportPh(float value) {
   Serial.print("pH:");
   Serial.print(value);
-  currentPh = value;
   formatMeasurement(currentPhString, value);
   redrawMenu();
 }
@@ -725,7 +783,6 @@ void reportPh(float value) {
 void reportTds(float value) {
   Serial.print("TDS:");
   Serial.print(value);
-  currentTds = value;
   formatMeasurement(currentTdsString, value);
   redrawMenu();
 }
@@ -835,7 +892,7 @@ void calibrate(String args) {
 }
 
 // PUMP FUNCTIONS
-bool empty(byte delaySeconds) {
+bool empty(unsigned int delaySeconds) {
   return runCountDown(
     delaySeconds,
     []() {
@@ -848,7 +905,7 @@ bool empty(byte delaySeconds) {
     });
 }
 
-bool fill(byte delaySeconds) {
+bool fill(unsigned int delaySeconds) {
   return runCountDown(
     delaySeconds,
     []() {
@@ -862,7 +919,7 @@ bool fill(byte delaySeconds) {
 }
 
 // Circulates and keeps measuring TDS and pH. Readings taken while the pumps are running are only indicative.
-bool circulate(byte delaySeconds) {
+bool circulate(unsigned int delaySeconds) {
   bool done = runCountDown(
     delaySeconds,
     []() {
@@ -934,8 +991,6 @@ bool pumpNutrientB(byte durationSeconds) {
 const byte maxAdjustmentRounds = 6;
 const byte circulateSeconds = 40;
 const byte settleSeconds = 15;
-const byte acidPumpSeconds = 2;
-const byte nutrientPumpSeconds = 1;
 
 void resetAdjustments() {
   phState = PH_MEASURE;
@@ -1034,12 +1089,12 @@ Progress tdsAdjustment(float target) {
       }
     case TDS_A_PUMP:
       {
-        if (pumpNutrientA(nutrientPumpSeconds)) tdsState = TDS_B_PUMP;
+        if (pumpNutrientA(nutrientAPumpSeconds)) tdsState = TDS_B_PUMP;
         break;
       }
     case TDS_B_PUMP:
       {
-        if (pumpNutrientB(nutrientPumpSeconds)) tdsState = TDS_CIRCULATE;
+        if (pumpNutrientB(nutrientBPumpSeconds)) tdsState = TDS_CIRCULATE;
         break;
       }
     case TDS_CIRCULATE:
@@ -1076,16 +1131,6 @@ void circulate() {
 void adjustAll() {
   commandFromMenu = "a";
   Serial.println("adjust all");
-}
-
-void adjustPh() {
-  commandFromMenu = "p";
-  Serial.println("adjust ph");
-}
-
-void adjustTds() {
-  commandFromMenu = "t";
-  Serial.println("adjust ec");
 }
 
 void pumpA() {
@@ -1128,42 +1173,37 @@ void setupMenu() {
   menu.setAppearance(appearanceGeneral);  // Note there is no `&` operator when setting general (or global) appearance of the menu
 
   // Add menu items to menu page
-  pHValue.setPrecision(2);
-  TDSValue.setPrecision(2);
+  menuItemTargetPh.setPrecision(2);
+  menuItemTargetTds.setPrecision(0);
+  menuPageMain.addMenuItem(measureItem);
   menuPageMain.addMenuItem(pHValue);
   menuPageMain.addMenuItem(TDSValue);
-  menuPageMain.addMenuItem(measureItem);
+  menuPageMain.addMenuItem(menuItemTargetPh);
+  menuPageMain.addMenuItem(menuItemTargetTds);
+  menuPageMain.addMenuItem(menuItemAdjustAll);
+  menuPageMain.addMenuItem(menuItemPump);
+  menuPageMain.addMenuItem(menuItemReservoir);
   menuPageMain.addMenuItem(menuItemStop);
 
-  menuPageMain.addMenuItem(menuItemPump);
+  menuPagePump.addMenuItem(menuItemPumpAcidPage);
+  menuPagePumpAcid.addMenuItem(menuItemPumpAcid);
+  menuPagePumpAcid.addMenuItem(menuItemAcidAmount);
+  menuPagePump.addMenuItem(menuItemPumpAPage);
+  menuPagePumpA.addMenuItem(menuItemPumpA);
+  menuPagePumpA.addMenuItem(menuItemAAmount);
+  menuPagePump.addMenuItem(menuItemPumpBPage);
+  menuPagePumpB.addMenuItem(menuItemPumpB);
+  menuPagePumpB.addMenuItem(menuItemBAmount);
 
-  menuPagePump.addMenuItem(menuItemReservoir);
-  menuPageReservoir.addMenuItem(menuItemCirculate);
-  menuPageReservoir.addMenuItem(menuItemFill);
-  menuPageReservoir.addMenuItem(menuItemEmpty);
-
-  menuPagePump.addMenuItem(menuItemNutrients);
-  menuPageNutrients.addMenuItem(menuItemPumpA);
-  menuPageNutrients.addMenuItem(menuItemPumpB);
-  menuPageNutrients.addMenuItem(menuItemPumpAcid);
-
-  menuPageMain.addMenuItem(menuItemAdjust);
-  menuPageAdjust.addMenuItem(menuItemTarget);
-  menuPageAdjust.addMenuItem(menuItemAdjustAll);
-  menuPageAdjust.addMenuItem(menuItemAdjustPh);
-  menuPageAdjust.addMenuItem(menuItemAdjustTds);
-
-  menuItemTargetPh.setPrecision(2);
-  menuItemTargetTds.setPrecision(2);
-  menuPageTarget.addMenuItem(menuItemTargetPh);
-  menuPageTarget.addMenuItem(menuItemTargetTds);
-
-  menuItemCurrentPh.setPrecision(2);
-  menuItemCurrentTds.setPrecision(2);
-  menuPageAdjusting.addMenuItem(menuItemTargetPh);
-  menuPageAdjusting.addMenuItem(menuItemTargetTds);
-  menuPageAdjusting.addMenuItem(menuItemCurrentPh);
-  menuPageAdjusting.addMenuItem(menuItemCurrentTds);
+  menuPageReservoir.addMenuItem(menuItemEmptyPage);
+  menuPageEmpty.addMenuItem(menuItemEmpty);
+  menuPageEmpty.addMenuItem(menuItemEmptyTime);
+  menuPageReservoir.addMenuItem(menuItemFillPage);
+  menuPageFill.addMenuItem(menuItemFill);
+  menuPageFill.addMenuItem(menuItemFillTime);
+  menuPageReservoir.addMenuItem(menuItemCirculatePage);
+  menuPageCirculate.addMenuItem(menuItemCirculate);
+  menuPageCirculate.addMenuItem(menuItemCirculateTime);
 
   // Add menu page to menu and set it as current
   menu.setMenuPageCurrent(menuPageMain);
@@ -1175,16 +1215,18 @@ void setupMenu() {
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial.setTimeout(100);
-  Serial.println("setup");
-
+  // The shift register outputs are always enabled (OE is tied to GND on the board) and power up in a random
+  // state, which can run the peristaltic pumps. Clear them before anything else.
   pinMode(shiftRegisterReset, OUTPUT);
   pinMode(shiftRegisterLatch, OUTPUT);
   pinMode(shiftRegisterData, OUTPUT);
   pinMode(shiftRegisterClock, OUTPUT);
   digitalWrite(shiftRegisterReset, HIGH);
   setShiftRegisterValue(0);
+
+  Serial.begin(115200);
+  Serial.setTimeout(100);
+  Serial.println("setup");
 
   ph4502c.init();
   // Peristaltic pumps connected to shift out register
@@ -1205,7 +1247,7 @@ void setup() {
   pinMode(inputPump.relayPin, OUTPUT);
   pinMode(outputPump.relayPin, OUTPUT);
   pinMode(LED_ERROR, OUTPUT);
-  pinMode(ABORT_SW, INPUT_PULLUP);
+  pinMode(ABORT_SW, INPUT_PULLUP);  // No pull up on the board
   stopAllPumps();
 
   const byte ADC_EN = 14;
@@ -1216,6 +1258,7 @@ void setup() {
   analogSetPinAttenuation(temperatureSensorIn, ADC_11db);
   analogSetPinAttenuation(tdsSensorIn, ADC_11db);
   loadCalibrations();
+  loadSettings();
 
   pinMode(rightPin, INPUT_PULLUP);
   pinMode(TFT_BL, OUTPUT);     // TTGO T-Display enable Backlight pin 4
@@ -1260,11 +1303,12 @@ bool parsePhTarget(const String &args) {
     return false;
   }
   // Pumping acid towards a nonsensical target would ruin the solution
-  if (value < 4 || value > 8) {
+  if (value < minTargetPh || value > maxTargetPh) {
     Serial.println("pH target must be between 4 and 8");
     return false;
   }
   targetPh = value;
+  saveSettings();
   return true;
 }
 
@@ -1274,11 +1318,12 @@ bool parseTdsTarget(const String &args) {
     Serial.println("Invalid TDS target");
     return false;
   }
-  if (value <= 0 || value > 3000) {
-    Serial.println("TDS target must be between 0 and 3000");
+  if (value < minTargetTds || value > maxTargetTds) {
+    Serial.println("TDS target must be between 1 and 3000");
     return false;
   }
   targetTds = value;
+  saveSettings();
   return true;
 }
 
@@ -1454,10 +1499,6 @@ void loop() {
 
   updatePumps();
 
-  static const byte emptyDelaySeconds = 10;
-  static const byte fillDelaySeconds = 10;
-  static const byte circulateDelaySeconds = 10;
-
   if (Serial.available() > 0) {
     handleCommand(Serial.readStringUntil('\n'));
   }
@@ -1483,17 +1524,17 @@ void loop() {
   switch (state) {
     case CIRCULATE:
       {
-        if (circulate(circulateDelaySeconds)) state = IDLE;
+        if (circulate(circulateManuallySeconds)) state = IDLE;
         break;
       }
     case EMPTY:
       {
-        if (empty(emptyDelaySeconds)) state = IDLE;
+        if (empty(emptySeconds)) state = IDLE;
         break;
       }
     case FILL:
       {
-        if (fill(fillDelaySeconds)) state = IDLE;
+        if (fill(fillSeconds)) state = IDLE;
         break;
       }
     case MEASURE:
@@ -1546,12 +1587,12 @@ void loop() {
       }
     case PUMP_NUTRIENT_A:
       {
-        if (pumpNutrientA(nutrientPumpSeconds)) state = pumpBothNutrients ? PUMP_NUTRIENT_B : CIRCULATE;
+        if (pumpNutrientA(nutrientAPumpSeconds)) state = pumpBothNutrients ? PUMP_NUTRIENT_B : CIRCULATE;
         break;
       }
     case PUMP_NUTRIENT_B:
       {
-        if (pumpNutrientB(nutrientPumpSeconds)) state = CIRCULATE;
+        if (pumpNutrientB(nutrientBPumpSeconds)) state = CIRCULATE;
         break;
       }
     case IDLE:

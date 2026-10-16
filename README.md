@@ -23,5 +23,9 @@ reference solution, wait until the readings are stable (e.g. `l 60`) and send:
 ## Float switches
 
 A triggered float switch blocks its pump immediately and lights the error LED. The pump continues once the
-switch has stayed released for a second. GPIO 37 and 38 have no internal pull ups, so the switches need
-external ones.
+switch has stayed released for a second.
+
+## Menu
+
+The menu follows `menu.txt` on the `local-main` branch. Pump amounts (dose run time, also used per adjustment
+round), reservoir pump times and the targets are saved in flash. Requires GEM 1.5 or newer (`GEMSpinner`).
