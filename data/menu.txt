@@ -1,0 +1,24 @@
+Measure
+Current pH EC
+Target pH EC
+Start auto adjust
+Pump
+  pH
+    pump
+    amount
+  A
+    pump
+    amount
+  B
+    pump
+    amount
+Pump
+  Empty
+    time
+  Fill
+    time
+  Circulate
+    time
+
+Abort
+
