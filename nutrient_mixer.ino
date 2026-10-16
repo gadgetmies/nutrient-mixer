@@ -10,6 +10,7 @@
 #include <Adafruit_ST7789.h>
 #include <GEM_adafruit_gfx.h>
 #include <Preferences.h>
+#include <SPI.h>
 #include <ph4502c_sensor.h>
 
 // BUTTON HANDLING
@@ -25,7 +26,9 @@ KeyDetector myKeyDetector(keys, sizeof(keys) / sizeof(Key));
 #define TFT_RST 23
 #define TFT_BL 4
 
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
+// Hardware SPI (the pins are routed through the GPIO matrix). Software SPI made every screen redraw very slow.
+#define TFT_SPI_FREQUENCY 40000000
+Adafruit_ST7789 tft = Adafruit_ST7789(&SPI, TFT_CS, TFT_DC, TFT_RST);
 
 
 const byte phSensorIn = 36;
@@ -449,6 +452,7 @@ void powerSensor(Sensor sensor) {
   if (sensor == TDS_SENSOR) value |= 1 << TDS_ON;
   if (sensor == PH_SENSOR) value |= 1 << PH_ON;
   setShiftRegisterValue(value);
+  cancelSampling();
 
   poweredSensor = sensor;
   sensorPoweredAt = millis();
@@ -472,15 +476,20 @@ const byte sensorSampleIntervalMilliseconds = 10;
 const float sensorMaxMilliVolts = 3100;       // ADC saturates around here with 11 dB attenuation
 const float sensorMaxSpreadMilliVolts = 100;  // Max spread of the middle half of the samples
 
-float readMilliVolts(byte pin) {
+// Sampling is spread over loop() iterations (one sample per call) so that the UI stays responsive while measuring
+struct {
+  bool active = false;
+  byte pin;
+  byte count;
+  unsigned long lastSampleAt;
   uint16_t samples[sensorSampleCount];
+} sampler;
 
-  analogReadMilliVolts(pin);
-  for (byte i = 0; i < sensorSampleCount; ++i) {
-    delay(sensorSampleIntervalMilliseconds);
-    samples[i] = analogReadMilliVolts(pin);
-  }
+void cancelSampling() {
+  sampler.active = false;
+}
 
+float evaluateSamples(byte pin, uint16_t *samples) {
   // Insertion sort
   for (byte i = 1; i < sensorSampleCount; ++i) {
     uint16_t sample = samples[i];
@@ -525,6 +534,37 @@ float readMilliVolts(byte pin) {
     Serial.print(spread);
     Serial.println(" mV). Is the probe connected?");
     return NAN;
+  }
+  return milliVolts;
+}
+
+// Takes at most one sample per call. Returns true once all samples have been taken, with milliVolts set
+// (NAN if the reading is unusable). Non-blocking: call repeatedly until it returns true.
+bool sampleMilliVolts(byte pin, float &milliVolts) {
+  if (!sampler.active || sampler.pin != pin) {
+    sampler.active = true;
+    sampler.pin = pin;
+    sampler.count = 0;
+    analogReadMilliVolts(pin);  // Discarded
+    sampler.lastSampleAt = millis();
+    return false;
+  }
+  if (millis() - sampler.lastSampleAt < sensorSampleIntervalMilliseconds) return false;
+
+  sampler.lastSampleAt = millis();
+  sampler.samples[sampler.count++] = analogReadMilliVolts(pin);
+  if (sampler.count < sensorSampleCount) return false;
+
+  sampler.active = false;
+  milliVolts = evaluateSamples(pin, sampler.samples);
+  return true;
+}
+
+// Blocking version of sampleMilliVolts() for places where responsiveness does not matter (e.g. calibration)
+float readMilliVolts(byte pin) {
+  float milliVolts;
+  while (!sampleMilliVolts(pin, milliVolts)) {
+    delay(1);
   }
   return milliVolts;
 }
@@ -648,9 +688,7 @@ float compensatePh(float pH, float temperature, float fromTemperature) {
   return 7 + (pH - 7) * (fromTemperature + 273.15f) / (temperature + 273.15f);
 }
 
-// The pH sensor must be powered and warmed up (see sensorReady())
-float measurePh(float temperature) {
-  const float milliVolts = readMilliVolts(phSensorIn);
+float milliVoltsToPh(float milliVolts, float temperature) {
   if (isnan(milliVolts)) return NAN;
 
   const float pH = compensatePh(applyCalibration(phCalibration, milliVolts), temperature, calibrationTemperature);
@@ -669,8 +707,9 @@ void formatMeasurement(char *target, float value) {
   }
 }
 
+// Only the main page shows the measurements, so other pages are not redrawn when the values change
 void redrawMenu() {
-  if (menu.readyForKey() && !menu.isEditMode()) {
+  if (menu.getCurrentMenuPage() == &menuPageMain && menu.readyForKey() && !menu.isEditMode()) {
     menu.drawMenu();
   }
 }
@@ -696,9 +735,7 @@ float compensateTdsMilliVolts(float milliVolts, float temperature) {
   return milliVolts / (1 + 0.02f * (temperature - calibrationTemperature));
 }
 
-// The TDS sensor must be powered and warmed up (see sensorReady())
-float measureTds(float temperature) {
-  const float milliVolts = readMilliVolts(tdsSensorIn);
+float milliVoltsToTds(float milliVolts, float temperature) {
   if (isnan(milliVolts)) return NAN;
 
   return max(applyCalibration(tdsCalibration, compensateTdsMilliVolts(milliVolts, temperature)), 0.0f);
@@ -708,8 +745,11 @@ float measureTds(float temperature) {
 bool measureSensor(Sensor sensor, float &value) {
   if (!sensorReady(sensor)) return false;
 
+  float milliVolts;
+  if (!sampleMilliVolts(sensor == TDS_SENSOR ? tdsSensorIn : phSensorIn, milliVolts)) return false;
+
   const float temperature = measureTemperature();
-  value = sensor == TDS_SENSOR ? measureTds(temperature) : measurePh(temperature);
+  value = sensor == TDS_SENSOR ? milliVoltsToTds(milliVolts, temperature) : milliVoltsToPh(milliVolts, temperature);
   return true;
 }
 
@@ -738,6 +778,7 @@ bool measureAll() {
 // Powers the sensors down and restarts measureAll() from the beginning
 void stopMeasuring() {
   measureAllStep = TDS_SENSOR;
+  cancelSampling();
   powerSensor(NO_SENSOR);
 }
 
@@ -1177,10 +1218,11 @@ void setup() {
   loadCalibrations();
 
   pinMode(rightPin, INPUT_PULLUP);
-  tft.init(240, 135);
   pinMode(TFT_BL, OUTPUT);     // TTGO T-Display enable Backlight pin 4
   digitalWrite(TFT_BL, HIGH);  // T-Display turn on Backlight
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);  // Must be before tft.init(), which would otherwise use the default SPI pins
   tft.init(135, 240);          // Initialize ST7789 240x135
+  tft.setSPISpeed(TFT_SPI_FREQUENCY);
   tft.setRotation(3);
   menu.init();
   setupMenu();
