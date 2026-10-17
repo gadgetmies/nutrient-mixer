@@ -7,9 +7,13 @@ Send `?` over serial (115200 baud) to list the commands.
 ## WiFi
 
 There are no network credentials in the code. When no network has been configured, the device starts a hotspot
-named `Mixer-XXXX`. Its password is generated on first boot and shown on the WiFi menu page (and printed to
-serial). Connect to the hotspot, open http://192.168.4.1 if the setup page does not open by itself, choose the
-network and enter its password. The credentials are stored in the ESP32's flash.
+named `Mix-XXXX` and shows a setup screen with a QR code for joining it. Scan the code with a phone camera (or
+join the hotspot with the name and password shown next to the code), choose the network on the setup page that
+opens and enter its password. If the page does not open by itself, go to http://192.168.4.1. The credentials
+are stored in the ESP32's flash.
+
+The hotspot password is generated on first boot. Any key returns from the setup screen to the menu; the screen
+can be shown again from WiFi > Show QR code (or `w qr`).
 
 With a configured network the device keeps reconnecting in the background instead of opening the hotspot.
 To change the network, use WiFi > Forget WiFi in the menu or send `w reset`. Requires the WiFiManager library

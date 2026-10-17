@@ -13,6 +13,7 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
+#include <qrcode.h>  // QR code encoder of the ESP32 core (ESP-IDF)
 #include <ph4502c_sensor.h>
 
 // BUTTON HANDLING
@@ -206,6 +207,7 @@ void pumpAcid();
 void measure();
 void abortFromMenu();
 void forgetWifiFromMenu();
+void showWifiQrCodeFromMenu();
 
 // UTILITY FUNCTIONS
 
@@ -279,6 +281,7 @@ void printUsage() {
   Serial.println("1 # Read pH with the PH4502C library");
   Serial.println("w # Show WiFi status");
   Serial.println("w reset # Forget the WiFi network and start the setup hotspot");
+  Serial.println("w qr # Show the setup hotspot QR code on the screen");
   Serial.println("! # Abort current operation (stop all pumps) and go to idle");
 }
 
@@ -305,6 +308,7 @@ GEMItem menuItemWifiState("State", wifiStateString, true);
 GEMItem menuItemWifiName("Net", wifiNameString, true);
 GEMItem menuItemWifiPassword("Pass", wifiPasswordString, true);
 GEMItem menuItemWifiAddress("IP", wifiAddressString, true);
+GEMItem menuItemShowQrCode("Show QR code", showWifiQrCodeFromMenu);
 GEMItem menuItemForgetWifi("Forget WiFi", forgetWifiFromMenu);
 GEMAppearance wifiAppearance;
 
@@ -387,7 +391,7 @@ void rotary_onButtonClick() {
   Serial.print("button pressed ");
   Serial.print(millis());
   Serial.println(" milliseconds after restart");
-  menu.registerKeyPress(GEM_KEY_OK);
+  handleKey(GEM_KEY_OK);
 }
 
 void rotary_loop() {
@@ -399,9 +403,9 @@ void rotary_loop() {
     Serial.print("Value: ");
     Serial.println(rotaryEncoder.readEncoder());
     if (changed > 0) {
-      menu.registerKeyPress(GEM_KEY_UP);
+      handleKey(GEM_KEY_UP);
     } else {
-      menu.registerKeyPress(GEM_KEY_DOWN);
+      handleKey(GEM_KEY_DOWN);
     }
   }
   if (rotaryEncoder.isEncoderButtonClicked()) {
@@ -787,8 +791,10 @@ void formatMeasurement(char *target, float value) {
 }
 
 // Redraws only if the page showing the changed values is open, so other pages are not slowed down
+bool qrScreenVisible = false;
+
 void redrawMenuIfShowing(GEMPage &page) {
-  if (menu.getCurrentMenuPage() == &page && menu.readyForKey() && !menu.isEditMode()) {
+  if (!qrScreenVisible && menu.getCurrentMenuPage() == &page && menu.readyForKey() && !menu.isEditMode()) {
     menu.drawMenu();
   }
 }
@@ -1182,6 +1188,10 @@ void abortFromMenu() {
   Serial.println("stop");
 }
 
+void showWifiQrCodeFromMenu() {
+  commandFromMenu = "w qr";
+}
+
 void forgetWifiFromMenu() {
   commandFromMenu = "w reset";
   Serial.println("forget wifi");
@@ -1223,6 +1233,7 @@ void setupMenu() {
   menuPageWifi.addMenuItem(menuItemWifiName);
   menuPageWifi.addMenuItem(menuItemWifiPassword);
   menuPageWifi.addMenuItem(menuItemWifiAddress);
+  menuPageWifi.addMenuItem(menuItemShowQrCode);
   menuPageWifi.addMenuItem(menuItemForgetWifi);
 
   menuPagePump.addMenuItem(menuItemPumpAcidPage);
@@ -1374,13 +1385,94 @@ void startHotspot() {
   Serial.print(hotspotPassword);
   Serial.println(" and open http://192.168.4.1 to select the network");
   wifiManager.startConfigPortal(hotspotName, hotspotPassword);
+  showWifiQrCode();
+}
+
+// WIFI SETUP SCREEN
+// Shows a QR code for joining the setup hotspot (the setup page then opens by itself) with the hotspot name
+// and password next to it. The code is drawn black on a white tile, which every QR reader can read; the
+// rest of the screen stays black like the menu. Any key returns to the menu.
+const byte qrModulePixels = 4;    // About 0.4 mm on the T-Display, readable by phones from 5-10 cm
+const byte qrQuietZoneModules = 2;  // The standard asks for 4, but phones cope with 2 and it saves space
+const int qrTileLeft = 2;
+
+// esp_qrcode_generate() calls this with the encoded code
+void drawQrCode(esp_qrcode_handle_t qrCode) {
+  const int size = esp_qrcode_get_size(qrCode);
+  const int tileSize = (size + 2 * qrQuietZoneModules) * qrModulePixels;
+  const int tileTop = (tft.height() - tileSize) / 2;
+  tft.fillRect(qrTileLeft, tileTop, tileSize, tileSize, ST77XX_WHITE);
+  const int left = qrTileLeft + qrQuietZoneModules * qrModulePixels;
+  const int top = tileTop + qrQuietZoneModules * qrModulePixels;
+  for (int y = 0; y < size; ++y) {
+    for (int x = 0; x < size; ++x) {
+      if (esp_qrcode_get_module(qrCode, x, y)) {
+        tft.fillRect(left + x * qrModulePixels, top + y * qrModulePixels, qrModulePixels, qrModulePixels, ST77XX_BLACK);
+      }
+    }
+  }
+}
+
+void printAt(int x, int y, byte textSize, uint16_t color, const char *text) {
+  tft.setTextSize(textSize);
+  tft.setTextColor(color);
+  tft.setCursor(x, y);
+  tft.print(text);
+}
+
+void showWifiQrCode() {
+  if (!wifiManager.getConfigPortalActive()) {
+    Serial.println("The setup hotspot is not running (use 'w reset' to start it)");
+    return;
+  }
+  qrScreenVisible = true;
+  tft.fillScreen(ST77XX_BLACK);
+
+  // Standard WiFi QR code format. The generated name and password contain no characters that need escaping.
+  char wifiQrText[64];
+  snprintf(wifiQrText, sizeof(wifiQrText), "WIFI:T:WPA;S:%s;P:%s;;", hotspotName, hotspotPassword);
+  esp_qrcode_config_t config = ESP_QRCODE_CONFIG_DEFAULT();
+  config.display_func = drawQrCode;
+  config.max_qrcode_version = 3;  // 29 x 29 modules, the largest that fits the screen at qrModulePixels
+  config.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;  // Raised automatically if it fits the same size
+  if (esp_qrcode_generate(&config, wifiQrText) != ESP_OK) {
+    Serial.println("Could not generate the WiFi QR code");
+  }
+
+  const int textLeft = 140;
+  const uint16_t labelColor = 0x8410;  // Grey
+  printAt(textLeft, 4, 2, ST77XX_WHITE, "Scan to");
+  printAt(textLeft, 22, 2, ST77XX_WHITE, "set up");
+  printAt(textLeft, 40, 2, ST77XX_WHITE, "WiFi");
+  printAt(textLeft, 64, 1, labelColor, "Network");
+  printAt(textLeft, 74, 2, ST77XX_WHITE, hotspotName);
+  printAt(textLeft, 96, 1, labelColor, "Password");
+  printAt(textLeft, 106, 2, ST77XX_WHITE, hotspotPassword);
+  printAt(textLeft, 126, 1, labelColor, "Press for menu");
+}
+
+void hideWifiQrCode() {
+  if (!qrScreenVisible) return;
+  qrScreenVisible = false;
+  menu.reInit();  // Restores the text size and colour that the setup screen changed
+  menu.drawMenu();
+}
+
+// All key presses go through here so that the setup screen can take them instead of the menu
+void handleKey(byte key) {
+  if (qrScreenVisible) {
+    if (key != GEM_KEY_NONE) hideWifiQrCode();
+    return;
+  }
+  menu.registerKeyPress(key);
 }
 
 void setupWifi() {
   WiFi.mode(WIFI_STA);
   uint8_t mac[6];
   WiFi.macAddress(mac);
-  snprintf(hotspotName, sizeof(hotspotName), "Mixer-%02X%02X", mac[4], mac[5]);
+  // Short enough (8 characters) to fit next to the QR code on the setup screen
+  snprintf(hotspotName, sizeof(hotspotName), "Mix-%02X%02X", mac[4], mac[5]);
   loadHotspotPassword();
 
 #ifndef DEBUG
@@ -1440,6 +1532,10 @@ void updateWifiStatus(bool force = false) {
   String name;
   String password = "-";
   String address = "-";
+  if (!wifiManager.getConfigPortalActive()) {
+    hideWifiQrCode();
+  }
+
   if (wifiManager.getConfigPortalActive()) {
     wifiState = "Hotspot";
     name = hotspotName;
@@ -1630,8 +1726,10 @@ void handleCommand(String incoming) {
         args.toLowerCase();
         if (args == "reset") {
           forgetWifi();
+        } else if (args == "qr") {
+          showWifiQrCode();
         } else if (args.length() > 0) {
-          Serial.println("Usage: w / w reset");
+          Serial.println("Usage: w / w reset / w qr");
           break;
         }
         updateWifiStatus(true);
@@ -1677,7 +1775,7 @@ void loop() {
     myKeyDetector.detect();
     // Pass pressed button to menu
     // (pressed button ID is stored in trigger property of KeyDetector object)
-    menu.registerKeyPress(myKeyDetector.trigger);
+    handleKey(myKeyDetector.trigger);
   }
 
   rotary_loop();
