@@ -102,7 +102,11 @@ Running the firmware in the simulator brought up these points (the firmware has 
    at about 710 ppm / pH 6.9. Longer circulation (or measuring the plant reservoir) would help.
 4. **TDS readings saturate at about 1290 ppm** with the default calibration (3.1 V at the ADC), while the target
    can be set up to 3000 ppm.
-5. **The dosing pump wiring disagrees with the board.** The firmware uses PPUMP1 for acid and PPUMP3/4 for B/A
+5. **The WiFi setup screen draws its text in the menu font.** GEM leaves its own font (GFX fonts place the
+   cursor at the text baseline) set on the display, and `showWifiQrCode()` does not reset it, so "Scan to" at
+   y = 4 is cut off at the top edge and the labels overlap the names below them. `tft.setFont()` at the start
+   of `showWifiQrCode()` would restore the built-in font.
+6. **The dosing pump wiring disagrees with the board.** The firmware uses PPUMP1 for acid and PPUMP3/4 for B/A
    (with a TODO), the silkscreen puts the nutrients on the left L298N (PPUMP1/2) and acid on the right one.
    Parameters > Pumps > Dosing tube wiring switches between the two.
 
