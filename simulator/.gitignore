@@ -1,0 +1,5 @@
+# Downloaded Arduino libraries, build output and the simulated device's flash and world
+.deps/
+build/
+build-*/
+state/

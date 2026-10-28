@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nutrient Mixer Simulator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>Nutrient Mixer Simulator</h1>
+      <div class="sub">nutrient_mixer.ino on a simulated ESP32 · T-Display</div>
+    </div>
+  </div>
+  <div class="fw-state" id="fwState" title="Firmware state machine">
+    <span class="dot"></span><span id="fwStateName">connecting…</span><span id="fwSubState" class="muted"></span>
+  </div>
+  <div class="clock">
+    <div><span class="label">Uptime</span> <span id="uptime" class="mono">–</span></div>
+    <div><span class="label">Speed</span> <span id="actualSpeed" class="mono">–</span></div>
+  </div>
+  <div class="speed" role="group" aria-label="Simulation speed">
+    <button id="pauseButton" class="icon-button" title="Pause / resume (P)">❚❚</button>
+    <button id="stepButton" class="icon-button" title="Step 1 s of device time">⏭</button>
+    <span class="seg" id="speedButtons">
+      <button data-speed="1">1×</button><button data-speed="2">2×</button><button data-speed="5">5×</button><button data-speed="10">10×</button><button data-speed="50">50×</button><button data-speed="0" title="As fast as possible">Max</button>
+    </span>
+  </div>
+  <div class="device-actions">
+    <button id="resetDevice" title="Press the reset (EN) button: restarts the firmware, flash and world are kept">Reset ESP32</button>
+    <button id="eraseFlash" title="Erase the NVS flash (settings, calibration, WiFi) and restart">Erase flash</button>
+  </div>
+  <div id="connection" class="connection">offline</div>
+</header>
+
+<main class="layout">
+  <section class="column device">
+    <div class="card front-panel">
+      <div class="card-title">Front panel <span class="hint">scroll / arrows turn the knob · click or Enter pushes · Esc = abort</span></div>
+      <div id="frontPanel"></div>
+    </div>
+    <div class="card status">
+      <div class="card-title">Firmware</div>
+      <div id="statusPanel"></div>
+    </div>
+    <div class="card console">
+      <div class="card-title">Serial monitor <span class="hint">115200 baud</span>
+        <label class="small-toggle"><input type="checkbox" id="hideDebug" checked> hide shift register debug</label>
+        <button id="clearConsole" class="link-button">clear</button>
+      </div>
+      <div id="consoleOutput" class="console-output mono" tabindex="0"></div>
+      <form id="consoleForm" class="console-input">
+        <input id="consoleInput" class="mono" autocomplete="off" spellcheck="false" placeholder="Command, e.g. ?  m  a 1000 6.0  !">
+        <button type="submit">Send</button>
+      </form>
+      <div class="chips" id="commandChips"></div>
+    </div>
+  </section>
+
+  <section class="column main">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="system" class="active">System</button>
+      <button role="tab" data-tab="board">Board &amp; modules</button>
+      <button role="tab" data-tab="charts">Charts</button>
+    </nav>
+    <div class="tab-panel active" id="tab-system">
+      <div id="warnings" class="warnings"></div>
+      <div id="systemDiagram" class="diagram"></div>
+    </div>
+    <div class="tab-panel" id="tab-board">
+      <div class="board-toolbar">
+        <label><input type="checkbox" id="showModules" checked> modules</label>
+        <label><input type="checkbox" id="showTDisplay" checked> T-Display mounted</label>
+        <label><input type="checkbox" id="showBottom"> bottom copper</label>
+        <label><input type="checkbox" id="showNets" checked> live net levels</label>
+        <span id="boardHover" class="board-hover mono"></span>
+      </div>
+      <div id="boardView" class="board-view"></div>
+    </div>
+    <div class="tab-panel" id="tab-charts">
+      <div class="chart-toolbar" role="group" aria-label="Time range">
+        <span class="seg" id="chartRange">
+          <button data-range="300">5 min</button><button data-range="1800" class="active">30 min</button><button data-range="7200">2 h</button><button data-range="0">All</button>
+        </span>
+        <button id="clearCharts" class="link-button">clear</button>
+      </div>
+      <div id="charts"></div>
+    </div>
+    <div class="side-grid">
+      <div class="card">
+        <div class="card-title">World</div>
+        <div id="worldActions"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">WiFi &amp; phone</div>
+        <div id="wifiPanel"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Parameters &amp; faults <button id="resetParams" class="link-button">defaults</button></div>
+        <div id="paramsPanel"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

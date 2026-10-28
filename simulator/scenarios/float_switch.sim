@@ -1,0 +1,17 @@
+# The mixer float switch blocks the input pump when the mixer reservoir is full and lights the error LED
+wait 2
+world volume mixer 8.8
+serial f
+until firmware.inputPump.blocked == true timeout 15
+expect-serial Input pump float switch triggered
+expect board.leds.LED1 == true
+expect world.inputPump.on == false
+print world.mixer.volume
+# A float switch stuck closed keeps the pump blocked; stuck open lets the reservoir overflow
+serial !
+set fault.mixerFloat 1
+world volume mixer 9.8
+wait 2
+serial f
+until world.mixer.spilled > 0 timeout 30
+expect board.leds.LED1 == false

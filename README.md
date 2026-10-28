@@ -44,3 +44,9 @@ switch has stayed released for a second.
 
 The menu follows `menu.txt` on the `local-main` branch. Pump amounts (dose run time, also used per adjustment
 round), reservoir pump times and the targets are saved in flash. Requires GEM 1.5 or newer (`GEMSpinner`).
+
+## Simulator
+
+`simulator/` runs this firmware on a Mac against a simulated T-Display, the mixer board (`eagle/`) and the
+pumps, reservoirs and sensors around it, with a browser UI: `cd simulator && make run`. See
+[simulator/README.md](simulator/README.md).

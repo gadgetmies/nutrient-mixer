@@ -1,0 +1,11 @@
+# EAGLE auto-backup files
+*.b#*
+*.s#*
+*.l#*
+
+# CAM job files and snapshots (not tracked)
+*.job
+*.zip
+
+# macOS
+.DS_Store

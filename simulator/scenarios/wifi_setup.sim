@@ -1,0 +1,20 @@
+# Configures WiFi through the setup hotspot: show the QR code, scan it with the phone, pick the network on the
+# portal page and check that the device connects (and remembers it)
+wait 2
+expect firmware.wifi == Hotspot
+serial w qr
+wait 0.5
+expect firmware.qrScreen == true
+wifi scan
+expect wifi.phoneJoined == true
+wifi submit HomeNet hydroponics
+until firmware.wifi == Connected timeout 30
+expect wifi.savedSsid == HomeNet
+expect wifi.apActive == false
+expect firmware.qrScreen == false
+# The router goes down and comes back: the device reconnects without opening the hotspot
+wifi network HomeNet off
+until firmware.wifi == Connecting timeout 10
+wifi network HomeNet on
+until firmware.wifi == Connected timeout 30
+expect wifi.apActive == false

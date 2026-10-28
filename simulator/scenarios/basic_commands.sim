@@ -1,0 +1,14 @@
+# Measures, doses nutrient A and fills the mixer reservoir using serial commands
+wait 3
+serial m
+until-serial pH: timeout 30
+expect firmware.state == IDLE
+print firmware.ph firmware.tds world.mixer.ph world.mixer.tds
+serial n a
+until firmware.state == PUMP_NUTRIENT_A timeout 2
+expect world.peristaltic.3.on == true
+until firmware.state == CIRCULATE timeout 5
+expect world.peristaltic.3.on == false
+until firmware.state == IDLE timeout 30
+print world.bottles.1.ml world.mixer.tds
+screenshot build/basic_commands.png
