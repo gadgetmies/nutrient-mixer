@@ -1,0 +1,62 @@
+Partlist exported from /Users/mkiiski/Documents/EAGLE/projects/nutrient mixer/untitled.sch at 15.9.2025 14.59
+
+Part Value    Device                            Package                  Description                                         MF MPN          OC_FARNELL OC_NEWARK POPULARITY PROD_ID    SF_SKU    SPICEPREFIX
+C1            C-EUC0805                         C0805                    CAPACITOR, European symbol                                                               88                              C          
+C2            C-EUC0805                         C0805                    CAPACITOR, European symbol                                                               88                              C          
+C3            C-EUC0805                         C0805                    CAPACITOR, European symbol                                                               88                              C          
+D4            LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+D5            LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+D6            LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+D7            LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+D8            LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+D9            LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+IC1  74LS595D 74LS595D                          SO16                     8-bit SHIFT REGISTER, output latch                                                       0                                          
+J1            JACK-PLUG1                        SPC4078                  DC POWER JACK                                                       unknown    unknown   3                                          
+JP1           PINHD-1X9                         1X09                     PIN HEADER                                                                               13                                         
+JP2           PINHD-1X9                         1X09                     PIN HEADER                                                                               13                                         
+JP3           PINHD-1X6                         1X06                     PIN HEADER                                                                               79                                         
+JP4           PINHD-1X6                         1X06                     PIN HEADER                                                                               79                                         
+JP5           PINHD-1X3                         1X03                     PIN HEADER                                                                               92                                         
+JP6           PINHD-1X6                         1X06                     PIN HEADER                                                                               79                                         
+JP7           PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP8           PINHD-1X12                        1X12                     PIN HEADER                                                                               28                                         
+JP9           PINHD-1X12                        1X12                     PIN HEADER                                                                               28                                         
+JP10          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP11          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP12          PINHD-1X4                         1X04                     PIN HEADER                                                                               91                                         
+JP13          PINHD-1X4                         1X04                     PIN HEADER                                                                               91                                         
+JP14          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP15          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP16          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP17          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP18          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP19          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+JP20          PINHD-1X2                         1X02                     PIN HEADER                                                                               98                                         
+LED1          LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+LED2          LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+LED3          LEDCHIP-LED0603                   CHIP-LED0603             LED                                                                                      26                                         
+Q1   BSS123   BSS123                            SOT23                    N-CHANNEL MOS FET                                                                        21                                         
+Q2   BSS123   BSS123                            SOT23                    N-CHANNEL MOS FET                                                                        21                                         
+R1   10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R2   20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R3   10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R4   20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R5   10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R6   20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R7   10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R8   10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R9   20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R10  20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R11  20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R12  20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R13  20k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R14  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R15  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R16  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R17  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R18  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R19  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R20  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+R21  10k      R-EU_R0805                        R0805                    RESISTOR, European symbol                                                                86                              R          
+S1            MOMENTARY-SWITCH-SPST-2-SMD-5.2MM TACTILE_SWITCH_SMD_5.2MM Momentary Switch (Pushbutton) - SPST - Two Circuits                                                 SWCH-08247 COM-08720            
+SW1  EC12E_SW EC12E_SW                          ALPS_EC12E_SW            ALPS rotary Encoder EC12E series with switch           EC12E2424407 1520813    74M1068   3                                          

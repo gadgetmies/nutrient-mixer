@@ -1,0 +1,22 @@
+# Two point pH calibration in buffer solutions corrects an offset of the pH board. The probe needs a couple
+# of minutes in each solution to settle before calibrating (like `l 60` would show).
+set ph.offset 60
+set ph.location 3
+wait 150
+serial m
+until-serial pH: timeout 20
+print firmware.ph
+serial k ph 7.0
+until-serial pH calibration timeout 20
+set ph.location 2
+wait 150
+serial k ph 4.0
+until-serial pH calibration timeout 20
+set ph.location 0
+wait 150
+serial m
+until-serial pH: timeout 20
+print firmware.ph world.mixer.ph firmware.phCalibration
+expect firmware.phCalibration.lowValue == 4
+expect firmware.ph >= 6.85
+expect firmware.ph <= 7.05

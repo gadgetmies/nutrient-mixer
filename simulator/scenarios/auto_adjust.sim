@@ -1,0 +1,10 @@
+# Full automatic adjustment from the default "used solution" (about 600 ppm, pH 7.0) to the default targets
+# (1000 ppm, pH 6.0): TDS rounds first, then pH rounds.
+wait 2
+serial a
+until firmware.state == ADJUST_ALL timeout 5
+until firmware.state == ADJUST_PH timeout 1200
+print firmware.tds firmware.tdsRound world.mixer.tds world.plant.tds
+until firmware.state == IDLE timeout 1200
+print firmware.ph firmware.tds firmware.phRound world.mixer.ph world.plant.ph world.mixer.tds world.plant.tds world.mixer.volume world.plant.volume
+expect-serial pH adjustment done
