@@ -1,261 +1,320 @@
 --------------------------- MODULE NutrientMixer ---------------------------
 (***************************************************************************)
-(* Model of the control state machine in nutrient_mixer.ino.               *)
+(* Model of the control state machine in ../nutrient_mixer.ino.            *)
 (*                                                                         *)
-(* One iteration of Arduino loop() is split into two TLA+ steps:           *)
-(*   pc = "read" : a command (serial or menu) may arrive and is applied    *)
-(*                 by the first `switch (command)`;                        *)
-(*   pc = "exec" : the second `switch (state)` runs one slice of work.     *)
+(* One iteration of loop() is two TLA+ steps:                              *)
+(*   pc = "read" : at most one command arrives (serial, menu or the abort  *)
+(*                 switch) and handleCommand() applies it;                 *)
+(*   pc = "exec" : the `switch (state)` runs one slice of work.            *)
 (*                                                                         *)
 (* Abstractions                                                            *)
-(*   - Time: CountDown expiry is nondeterministic (remaining() = 0 or not).*)
-(*   - Sensors: whether a reading is "in range" is nondeterministic.       *)
-(*   - The single `static CountDown` / `static bool running` inside        *)
-(*     runCountDown() is SHARED by every caller; modelled as `cdRunning`.  *)
-(*   - reset() (null function pointer call) is modelled as a reboot that   *)
-(*     re-initialises every static variable.                               *)
+(*   - Time: whether a countdown has expired, a sensor has warmed up or    *)
+(*     all samples are in is nondeterministic. Any busy slice may also do  *)
+(*     nothing (ExecWait).                                                 *)
+(*   - Sensor values: whether a reading is unusable (NAN), in range or     *)
+(*     still off target is nondeterministic.                               *)
+(*   - Targets, durations, calibration, WiFi and the display are left out; *)
+(*     "?" stands for every command that does not touch the operation      *)
+(*     state (?, w, k, 1, malformed arguments).                            *)
+(*   - Float switches only gate the relays in updatePumps(); `pumps` is    *)
+(*     the set of pumps the firmware has requested.                        *)
 (***************************************************************************)
-EXTENDS Naturals
-
-CONSTANTS
-    BootPumps,        \* pumps energised by setup() (input/output relays HIGH)
-    BusyCommands      \* commands that can still arrive while state # IDLE
+EXTENDS Naturals, FiniteSets
 
 Pumps    == {"Input", "Output", "Acid", "NutA", "NutB"}
+Dosing   == {"Acid", "NutA", "NutB"}
 States   == {"IDLE", "CIRCULATE", "EMPTY", "FILL", "MEASURE", "PLOT",
              "ADJUST_PH", "ADJUST_TDS", "ADJUST_ALL", "PUMP_PH",
-             "PUMP_NUTRIENT", "ABORT"}
-PhSubs   == {"PH_MEASURE", "PH_PUMP", "PH_CIRCULATE"}
-TdsSubs  == {"TDS_MEASURE", "TDS_A_PUMP", "TDS_B_PUMP", "TDS_CIRCULATE"}
-\* Characters handled by `switch (command)`; "none" = no input this loop,
-\* "?" = help / unknown command (both leave `state` untouched).
-Commands == {"t", "p", "a", "e", "f", "c", "n", "u", "m", "l", "!", "?"}
-MaxRound == 6   \* rounds stop once adjustmentRound > 5
+             "PUMP_NUTRIENT_A", "PUMP_NUTRIENT_B"}
+PhSubs   == {"PH_MEASURE", "PH_PUMP", "PH_CIRCULATE", "PH_SETTLE"}
+TdsSubs  == {"TDS_MEASURE", "TDS_A_PUMP", "TDS_B_PUMP", "TDS_CIRCULATE",
+             "TDS_SETTLE"}
+Sensors  == {"NONE", "TDS", "PH"}
+\* "n" = both nutrients, "na" / "nb" = one of them, "!" = abort (serial,
+\* menu Abort or the abort switch), "?" = anything that leaves state alone.
+Commands == {"t", "p", "a", "e", "f", "c", "n", "na", "nb", "u", "m", "l",
+             "!", "?"}
+BusyCommands == {"!", "?"}   \* handleCommand() also lets 'w' through
+MaxRounds == 6               \* maxAdjustmentRounds
 
 VARIABLES
     pc,          \* "read" | "exec"
-    state,       \* loop()'s static State
-    phSub,       \* pHadjustment()'s static state
-    tdsSub,      \* TDSadjustment()'s static state
-    phRound,     \* pHadjustment()'s static adjustmentRound
-    tdsRound,    \* TDSadjustment()'s static adjustmentRound
-    cdRunning,   \* runCountDown()'s static `running`
-    pumps        \* set of energised pumps
+    state,       \* State state
+    phSub,       \* phState
+    tdsSub,      \* tdsState
+    phRound,     \* phAdjustmentRound
+    tdsRound,    \* tdsAdjustmentRound
+    both,        \* pumpBothNutrients
+    cdRunning,   \* countDown.running (one timer shared by every timed step)
+    sensor,      \* poweredSensor
+    measStep,    \* measureAllStep
+    pumps        \* pumps requested on
 
-vars == <<pc, state, phSub, tdsSub, phRound, tdsRound, cdRunning, pumps>>
+vars == <<pc, state, phSub, tdsSub, phRound, tdsRound, both, cdRunning,
+          sensor, measStep, pumps>>
 
 TypeOK ==
     /\ pc \in {"read", "exec"}
     /\ state \in States
     /\ phSub \in PhSubs
     /\ tdsSub \in TdsSubs
-    /\ phRound \in 0..MaxRound
-    /\ tdsRound \in 0..MaxRound
+    /\ phRound \in 0..MaxRounds
+    /\ tdsRound \in 0..MaxRounds
+    /\ both \in BOOLEAN
     /\ cdRunning \in BOOLEAN
+    /\ sensor \in Sensors
+    /\ measStep \in {"TDS", "PH"}
     /\ pumps \subseteq Pumps
 
-Init ==
+Init ==   \* setup() clears the shift register and calls stopAllPumps()
     /\ pc = "read"
     /\ state = "IDLE"
     /\ phSub = "PH_MEASURE"
     /\ tdsSub = "TDS_MEASURE"
     /\ phRound = 0
     /\ tdsRound = 0
+    /\ both = FALSE
     /\ cdRunning = FALSE
-    /\ pumps = BootPumps
+    /\ sensor = "NONE"
+    /\ measStep = "TDS"
+    /\ pumps = {}
 
 -----------------------------------------------------------------------------
-(* Phase 1: switch (command)                                               *)
+(* Helpers mirroring the firmware                                          *)
 
-NextState(cmd) ==
-    CASE cmd = "t" -> "ADJUST_TDS"
-      [] cmd = "p" -> "ADJUST_PH"
-      [] cmd = "a" -> "ADJUST_ALL"
-      [] cmd = "e" -> "EMPTY"
-      [] cmd = "f" -> "FILL"
-      [] cmd = "c" -> "CIRCULATE"
-      [] cmd = "n" -> "PUMP_NUTRIENT"
-      [] cmd = "u" -> "PUMP_PH"
-      [] cmd = "m" -> "MEASURE"
-      [] cmd = "l" -> "PLOT"
-      [] cmd = "!" -> "ABORT"
-      [] OTHER     -> state
+ResetAdjustments ==
+    /\ phSub' = "PH_MEASURE" /\ phRound' = 0
+    /\ tdsSub' = "TDS_MEASURE" /\ tdsRound' = 0
 
-\* The firmware prints "Operation in progress" when busy but still applies
-\* the command; BusyCommands controls which commands may arrive then.
+\* stopMeasuring(): measureAllStep = TDS, cancelSampling(), power off
+StopMeasuring == sensor' = "NONE" /\ measStep' = "TDS"
+
+\* abortOperation(): stopAllPumps, cancelCountDown, stopMeasuring,
+\* resetAdjustments, state = IDLE
+AbortOperation ==
+    /\ pumps' = {} /\ cdRunning' = FALSE /\ StopMeasuring
+    /\ ResetAdjustments /\ state' = "IDLE"
+
+\* startOperation(s): like abortOperation but leaves the pumps alone
+StartOperation(s) ==
+    /\ cdRunning' = FALSE /\ StopMeasuring
+    /\ ResetAdjustments /\ state' = s
+
+-----------------------------------------------------------------------------
+(* pc = "read": handleCommand()                                            *)
+
+Target(cmd) ==
+    CASE cmd = "t" -> "ADJUST_TDS"   [] cmd = "p" -> "ADJUST_PH"
+      [] cmd = "a" -> "ADJUST_ALL"   [] cmd = "e" -> "EMPTY"
+      [] cmd = "f" -> "FILL"         [] cmd = "c" -> "CIRCULATE"
+      [] cmd = "u" -> "PUMP_PH"      [] cmd = "m" -> "MEASURE"
+      [] cmd = "l" -> "PLOT"         [] cmd = "nb" -> "PUMP_NUTRIENT_B"
+      [] cmd \in {"n", "na"} -> "PUMP_NUTRIENT_A"
+
 Receive(cmd) ==
-    /\ pc = "read"
+    /\ pc = "read" /\ pc' = "exec"
+    \* "Operation in progress. Cannot run command."
     /\ state = "IDLE" \/ cmd \in BusyCommands
-    /\ state' = NextState(cmd)
-    /\ pc' = "exec"
-    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, cdRunning, pumps>>
+    /\ CASE cmd = "!" -> AbortOperation /\ UNCHANGED both
+         [] cmd = "?" -> UNCHANGED <<state, phSub, tdsSub, phRound, tdsRound,
+                                    both, cdRunning, sensor, measStep, pumps>>
+         [] OTHER     -> /\ StartOperation(Target(cmd))
+                         /\ both' = IF cmd \in {"n", "na"} THEN cmd = "n"
+                                                         ELSE both
+                         /\ UNCHANGED pumps
 
 NoInput ==
-    /\ pc = "read"
-    /\ pc' = "exec"
-    /\ UNCHANGED <<state, phSub, tdsSub, phRound, tdsRound, cdRunning, pumps>>
+    /\ pc = "read" /\ pc' = "exec"
+    /\ UNCHANGED <<state, phSub, tdsSub, phRound, tdsRound, both, cdRunning,
+                   sensor, measStep, pumps>>
 
-CmdTDS      == Receive("t")
-CmdPH       == Receive("p")
-CmdAll      == Receive("a")
-CmdEmpty    == Receive("e")
-CmdFill     == Receive("f")
-CmdCirc     == Receive("c")
-CmdNutrient == Receive("n")
-CmdAcid     == Receive("u")
-CmdMeasure  == Receive("m")
-CmdPlot     == Receive("l")
-CmdAbort    == Receive("!")
-CmdOther    == Receive("?")
+ReadStep == NoInput \/ \E cmd \in Commands : Receive(cmd)
 
 -----------------------------------------------------------------------------
-(* runCountDown(start, stop) as three outcomes.                            *)
-(*   CdStart(on): !running -> running := TRUE, start() energises `on`.     *)
-(*   CdWait     : running, remaining() > 0 -> nothing.                     *)
-(*   CdStop(off): running, remaining() = 0 -> running := FALSE,            *)
-(*                stop() de-energises `off`, returns TRUE.                 *)
+(* pc = "exec": one slice of the current operation.                        *)
+(* Each operation is a set of "progress" steps (ExecGo) plus slices where   *)
+(* time passes without visible effect (ExecWait, MeasureWhileRunning).      *)
 
-CdStart(on) == ~cdRunning /\ cdRunning' = TRUE  /\ pumps' = pumps \cup on
-CdWait      ==  cdRunning /\ UNCHANGED <<cdRunning, pumps>>
-CdStop(off) ==  cdRunning /\ cdRunning' = FALSE /\ pumps' = pumps \ off
-
-\* Every exec step returns to "read"; `done` returns the machine to IDLE.
 Exec == pc = "exec" /\ pc' = "read"
 
-\* Timed actions that end in IDLE (CIRCULATE, EMPTY, FILL).
-Timed(st, set) ==
-    /\ Exec /\ state = st
-    /\ \/ CdStart(set) /\ UNCHANGED state
-       \/ CdWait       /\ UNCHANGED state
-       \/ CdStop(set)  /\ state' = "IDLE"
-    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound>>
+\* runCountDown(d, start, stop): first call starts, a later call stops.
+\* `on` / `off` are the pumps start() and stop() switch.
+TimerStart(on) == ~cdRunning /\ cdRunning' = TRUE  /\ pumps' = pumps \cup on
+TimerStop(off) ==  cdRunning /\ cdRunning' = FALSE /\ pumps' = pumps \ off
 
-ExecCirculate == Timed("CIRCULATE", {"Input", "Output"})
-ExecEmpty     == Timed("EMPTY", {"Output"})
-ExecFill      == Timed("FILL", {"Input"})
+\* A timed operation in loop(): state `st` runs pumps `p`, then goes to `nx`
+TimedOp(st, p, nx) ==
+    /\ state = st
+    /\ \/ TimerStart(p) /\ UNCHANGED <<state, sensor, measStep>>
+       \/ TimerStop(p)  /\ state' = nx /\ UNCHANGED <<sensor, measStep>>
+    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, both>>
 
-ExecMeasure ==
-    /\ Exec /\ state = "MEASURE" /\ state' = "IDLE"
-    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, cdRunning, pumps>>
+\* circulate(): input + output pumps, measureAll() while running,
+\* stopMeasuring() when the time is up
+CircStart == TimerStart({"Input", "Output"}) /\ UNCHANGED <<sensor, measStep>>
+CircStop  == TimerStop({"Input", "Output"}) /\ StopMeasuring
 
-ExecPlot ==   \* start/stop callbacks are no-ops
-    /\ Exec /\ state = "PLOT"
-    /\ \/ ~cdRunning /\ cdRunning' = TRUE  /\ UNCHANGED state
-       \/  cdRunning /\ UNCHANGED <<cdRunning, state>>
-       \/  cdRunning /\ cdRunning' = FALSE /\ state' = "IDLE"
-    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, pumps>>
+GoEmpty    == TimedOp("EMPTY", {"Output"}, "IDLE")
+GoFill     == TimedOp("FILL", {"Input"}, "IDLE")
+GoPumpAcid == TimedOp("PUMP_PH", {"Acid"}, "CIRCULATE")
+GoPumpA    == TimedOp("PUMP_NUTRIENT_A", {"NutA"},
+                      IF both THEN "PUMP_NUTRIENT_B" ELSE "CIRCULATE")
+GoPumpB    == TimedOp("PUMP_NUTRIENT_B", {"NutB"}, "CIRCULATE")
 
-ExecPumpAcid ==   \* pumppH(2), then CIRCULATE
-    /\ Exec /\ state = "PUMP_PH"
-    /\ \/ CdStart({"Acid"}) /\ UNCHANGED state
-       \/ CdWait            /\ UNCHANGED state
-       \/ CdStop({"Acid"})  /\ state' = "CIRCULATE"
-    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound>>
+GoCirculate ==
+    /\ state = "CIRCULATE"
+    /\ \/ CircStart /\ UNCHANGED state
+       \/ CircStop /\ state' = "IDLE"
+    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, both>>
 
-ExecAbort ==   \* stop everything, then reset() reboots the MCU
-    /\ Exec /\ state = "ABORT"
-    /\ pumps' = {} /\ state' = "IDLE"
-    /\ phSub' = "PH_MEASURE" /\ tdsSub' = "TDS_MEASURE"
-    /\ phRound' = 0 /\ tdsRound' = 0 /\ cdRunning' = FALSE
+\* measureAll() as used by MEASURE: power TDS, read it, power pH, read it
+GoMeasure ==
+    /\ state = "MEASURE"
+    /\ \/ sensor # measStep /\ sensor' = measStep
+          /\ UNCHANGED <<measStep, state>>
+       \/ sensor = measStep /\ measStep = "TDS" /\ measStep' = "PH"
+          /\ UNCHANGED <<sensor, state>>
+       \/ sensor = measStep /\ measStep = "PH" /\ measStep' = "TDS"
+          /\ sensor' = "NONE" /\ state' = "IDLE"
+    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, both, cdRunning, pumps>>
 
-ExecIdle ==
-    /\ Exec /\ state = "IDLE"
-    /\ UNCHANGED <<state, phSub, tdsSub, phRound, tdsRound, cdRunning, pumps>>
+GoPlot ==   \* the countdown's callbacks are empty; measureAll() runs alongside
+    /\ state = "PLOT"
+    /\ \/ ~cdRunning /\ cdRunning' = TRUE /\ UNCHANGED <<state, sensor, measStep>>
+       \/ cdRunning /\ cdRunning' = FALSE /\ StopMeasuring /\ state' = "IDLE"
+    /\ UNCHANGED <<phSub, tdsSub, phRound, tdsRound, both, pumps>>
 
------------------------------------------------------------------------------
-(* pHadjustment(target): one slice. `onDone` is the loop state to go to.   *)
-
-PhSlice(onDone) ==
-    \/ /\ phSub = "PH_MEASURE"
-       /\ \/ /\ phRound < MaxRound               \* pH too high: dose acid
-             /\ phSub' = "PH_PUMP" /\ phRound' = phRound + 1
-             /\ UNCHANGED state
-          \/ /\ phRound' = 0 /\ state' = onDone  \* in range, or round > 5
-             /\ UNCHANGED phSub
-       /\ UNCHANGED <<cdRunning, pumps>>
-    \/ /\ phSub = "PH_PUMP"
-       /\ \/ CdStart({"Acid"}) /\ UNCHANGED phSub
-          \/ CdWait            /\ UNCHANGED phSub
-          \/ CdStop({"Acid"})  /\ phSub' = "PH_CIRCULATE"
-       /\ UNCHANGED <<state, phRound>>
-    \/ /\ phSub = "PH_CIRCULATE"
-       /\ \/ CdStart({"Input", "Output"}) /\ UNCHANGED phSub
-          \/ CdWait                       /\ UNCHANGED phSub
-          \/ CdStop({"Input", "Output"})  /\ phSub' = "PH_MEASURE"
-       /\ UNCHANGED <<state, phRound>>
-
-ExecAdjustPH ==
-    /\ Exec /\ state = "ADJUST_PH"
-    /\ PhSlice("IDLE")
-    /\ UNCHANGED <<tdsSub, tdsRound>>
+\* measureAll() called while circulating or plotting; never finishes them
+MeasureWhileRunning ==
+    /\ Exec /\ cdRunning
+    /\ \/ state \in {"CIRCULATE", "PLOT"}
+       \/ state = "ADJUST_PH" /\ phSub = "PH_CIRCULATE"
+       \/ state \in {"ADJUST_TDS", "ADJUST_ALL"} /\ tdsSub = "TDS_CIRCULATE"
+    /\ \/ sensor # measStep /\ sensor' = measStep /\ UNCHANGED measStep
+       \/ sensor = measStep /\ measStep' = (IF measStep = "TDS" THEN "PH" ELSE "TDS")
+          /\ UNCHANGED sensor
+    /\ UNCHANGED <<state, phSub, tdsSub, phRound, tdsRound, both, cdRunning, pumps>>
 
 -----------------------------------------------------------------------------
-(* TDSadjustment(target). `zeroTarget` is TRUE for the PUMP_NUTRIENT call, *)
-(* which uses the default target 0 and therefore finishes at TDS_MEASURE.  *)
+(* phAdjustment(): measure -> dose acid -> circulate -> settle -> measure. *)
+(* On FINISHED or FAILED loop() calls abortOperation().                    *)
 
-TdsSlice(onDone, zeroTarget) ==
-    \/ /\ tdsSub = "TDS_MEASURE"
-       /\ \/ /\ ~zeroTarget /\ tdsRound < MaxRound   \* TDS too low: dose
-             /\ tdsSub' = "TDS_A_PUMP" /\ tdsRound' = tdsRound + 1
-             /\ UNCHANGED state
-          \/ /\ tdsRound' = 0 /\ state' = onDone
-             /\ UNCHANGED tdsSub
-       /\ UNCHANGED <<cdRunning, pumps>>
-    \/ /\ tdsSub = "TDS_A_PUMP"
-       /\ \/ CdStart({"NutA"}) /\ UNCHANGED tdsSub
-          \/ CdWait            /\ UNCHANGED tdsSub
-          \/ CdStop({"NutA"})  /\ tdsSub' = "TDS_B_PUMP"
-       /\ UNCHANGED <<state, tdsRound>>
-    \/ /\ tdsSub = "TDS_B_PUMP"
-       /\ \/ CdStart({"NutB"}) /\ UNCHANGED tdsSub
-          \/ CdWait            /\ UNCHANGED tdsSub
-          \/ CdStop({"NutB"})  /\ tdsSub' = "TDS_CIRCULATE"
-       /\ UNCHANGED <<state, tdsRound>>
-    \/ /\ tdsSub = "TDS_CIRCULATE"
-       /\ \/ CdStart({"Input", "Output"}) /\ UNCHANGED tdsSub
-          \/ CdWait                       /\ UNCHANGED tdsSub
-          \/ CdStop({"Input", "Output"})  /\ tdsSub' = "TDS_MEASURE"
-       /\ UNCHANGED <<state, tdsRound>>
+GoAdjustPh ==
+    /\ state = "ADJUST_PH"
+    /\ UNCHANGED both
+    /\ \/ /\ phSub = "PH_MEASURE" /\ sensor # "PH"   \* powerSensor(PH_SENSOR)
+          /\ sensor' = "PH"
+          /\ UNCHANGED <<state, phSub, phRound, tdsSub, tdsRound, cdRunning,
+                         measStep, pumps>>
+       \/ /\ phSub = "PH_MEASURE" /\ sensor = "PH"   \* reading available
+          /\ \/ AbortOperation                     \* NAN, reached, or gave up
+             \/ /\ phRound < MaxRounds               \* pH still too high
+                /\ phRound' = phRound + 1 /\ phSub' = "PH_PUMP"
+                /\ sensor' = "NONE"
+                /\ UNCHANGED <<state, tdsSub, tdsRound, cdRunning, measStep, pumps>>
+       \/ /\ phSub = "PH_PUMP"
+          /\ \/ TimerStart({"Acid"}) /\ UNCHANGED phSub
+             \/ TimerStop({"Acid"}) /\ phSub' = "PH_CIRCULATE"
+          /\ UNCHANGED <<state, phRound, tdsSub, tdsRound, sensor, measStep>>
+       \/ /\ phSub = "PH_CIRCULATE"
+          /\ \/ CircStart /\ UNCHANGED phSub
+             \/ CircStop /\ phSub' = "PH_SETTLE"
+          /\ UNCHANGED <<state, phRound, tdsSub, tdsRound>>
+       \/ /\ phSub = "PH_SETTLE"
+          /\ \/ TimerStart({}) /\ UNCHANGED phSub
+             \/ TimerStop({}) /\ phSub' = "PH_MEASURE"
+          /\ UNCHANGED <<state, phRound, tdsSub, tdsRound, sensor, measStep>>
 
-ExecAdjustTDS ==
-    /\ Exec /\ state = "ADJUST_TDS"
-    /\ TdsSlice("IDLE", FALSE)
-    /\ UNCHANGED <<phSub, phRound>>
+(* tdsAdjustment(): measure -> A -> B -> circulate -> settle -> measure.   *)
+(* FINISHED in ADJUST_ALL hands over to ADJUST_PH (startOperation);         *)
+(* everything else ends in abortOperation().                               *)
 
-ExecAdjustAll ==   \* TDS first, then hand over to ADJUST_PH
-    /\ Exec /\ state = "ADJUST_ALL"
-    /\ TdsSlice("ADJUST_PH", FALSE)
-    /\ UNCHANGED <<phSub, phRound>>
+GoAdjustTds ==
+    /\ state \in {"ADJUST_TDS", "ADJUST_ALL"}
+    /\ UNCHANGED <<both>>
+    /\ \/ /\ tdsSub = "TDS_MEASURE" /\ sensor # "TDS"
+          /\ sensor' = "TDS"
+          /\ UNCHANGED <<state, phSub, phRound, tdsSub, tdsRound, cdRunning,
+                         measStep, pumps>>
+       \/ /\ tdsSub = "TDS_MEASURE" /\ sensor = "TDS"
+          /\ \/ AbortOperation                          \* FAILED (NAN)
+             \/ /\ state = "ADJUST_TDS" /\ AbortOperation   \* FINISHED
+             \/ /\ state = "ADJUST_ALL"                     \* FINISHED
+                /\ StartOperation("ADJUST_PH") /\ UNCHANGED pumps
+             \/ /\ tdsRound < MaxRounds                 \* TDS still too low
+                /\ tdsRound' = tdsRound + 1 /\ tdsSub' = "TDS_A_PUMP"
+                /\ sensor' = "NONE"
+                /\ UNCHANGED <<state, phSub, phRound, cdRunning, measStep, pumps>>
+       \/ /\ tdsSub = "TDS_A_PUMP"
+          /\ \/ TimerStart({"NutA"}) /\ UNCHANGED tdsSub
+             \/ TimerStop({"NutA"}) /\ tdsSub' = "TDS_B_PUMP"
+          /\ UNCHANGED <<state, phSub, phRound, tdsRound, sensor, measStep>>
+       \/ /\ tdsSub = "TDS_B_PUMP"
+          /\ \/ TimerStart({"NutB"}) /\ UNCHANGED tdsSub
+             \/ TimerStop({"NutB"}) /\ tdsSub' = "TDS_CIRCULATE"
+          /\ UNCHANGED <<state, phSub, phRound, tdsRound, sensor, measStep>>
+       \/ /\ tdsSub = "TDS_CIRCULATE"
+          /\ \/ CircStart /\ UNCHANGED tdsSub
+             \/ CircStop /\ tdsSub' = "TDS_SETTLE"
+          /\ UNCHANGED <<state, phSub, phRound, tdsRound>>
+       \/ /\ tdsSub = "TDS_SETTLE"
+          /\ \/ TimerStart({}) /\ UNCHANGED tdsSub
+             \/ TimerStop({}) /\ tdsSub' = "TDS_MEASURE"
+          /\ UNCHANGED <<state, phSub, phRound, tdsRound, sensor, measStep>>
 
-ExecPumpNutrient ==   \* TDSadjustment() with target 0, then CIRCULATE
-    /\ Exec /\ state = "PUMP_NUTRIENT"
-    /\ TdsSlice("CIRCULATE", TRUE)
-    /\ UNCHANGED <<phSub, phRound>>
+ExecGo ==
+    /\ Exec
+    /\ \/ GoEmpty \/ GoFill \/ GoPumpAcid \/ GoPumpA \/ GoPumpB
+       \/ GoCirculate \/ GoMeasure \/ GoPlot \/ GoAdjustPh \/ GoAdjustTds
+
+\* A slice in which nothing visible happens: timer not expired, sensor
+\* warming up, sample interval not reached, or the IDLE case.
+ExecWait ==
+    /\ Exec
+    /\ UNCHANGED <<state, phSub, tdsSub, phRound, tdsRound, both, cdRunning,
+                   sensor, measStep, pumps>>
 
 -----------------------------------------------------------------------------
 
-Next ==
-    \/ NoInput
-    \/ CmdTDS \/ CmdPH \/ CmdAll \/ CmdEmpty \/ CmdFill \/ CmdCirc
-    \/ CmdNutrient \/ CmdAcid \/ CmdMeasure \/ CmdPlot \/ CmdAbort \/ CmdOther
-    \/ ExecIdle \/ ExecCirculate \/ ExecEmpty \/ ExecFill \/ ExecMeasure
-    \/ ExecPlot \/ ExecPumpAcid \/ ExecAbort
-    \/ ExecAdjustPH \/ ExecAdjustTDS \/ ExecAdjustAll \/ ExecPumpNutrient
+Next == ReadStep \/ ExecGo \/ ExecWait \/ MeasureWhileRunning
 
-Spec == Init /\ [][Next]_vars
+\* Time passes and readings complete: if an operation can make progress
+\* infinitely often, it eventually does.
+Fairness == WF_vars(Next) /\ SF_vars(ExecGo)
+
+Spec == Init /\ [][Next]_vars /\ Fairness
 
 -----------------------------------------------------------------------------
-(* Safety properties                                                       *)
+(* Properties                                                              *)
 
-\* When the machine is idle, nothing should be pumping.
-IdleMeansPumpsOff == (pc = "read" /\ state = "IDLE") => pumps = {}
+Idle == pc = "read" /\ state = "IDLE"
 
-\* The shared countdown is never left armed while idle.
-IdleMeansCountdownFree == (pc = "read" /\ state = "IDLE") => ~cdRunning
+IdleMeansPumpsOff      == Idle => pumps = {}
+IdleMeansTimerFree     == Idle => ~cdRunning
+IdleMeansSensorsOff    == Idle => sensor = "NONE"
 
-\* Dosing pumps only run inside a dosing sub-state.
 AcidOnlyWhenDosing ==
     "Acid" \in pumps => \/ state = "PUMP_PH"
                         \/ state = "ADJUST_PH" /\ phSub = "PH_PUMP"
+NutrientAOnlyWhenDosing ==
+    "NutA" \in pumps => \/ state = "PUMP_NUTRIENT_A"
+                        \/ state \in {"ADJUST_TDS", "ADJUST_ALL"} /\ tdsSub = "TDS_A_PUMP"
+NutrientBOnlyWhenDosing ==
+    "NutB" \in pumps => \/ state = "PUMP_NUTRIENT_B"
+                        \/ state \in {"ADJUST_TDS", "ADJUST_ALL"} /\ tdsSub = "TDS_B_PUMP"
+
+OneDosingPumpAtATime == Cardinality(pumps \cap Dosing) <= 1
+NoDosingWhileCirculating ==
+    {"Input", "Output"} \subseteq pumps => pumps \cap Dosing = {}
+
+\* Sensors are only read inside the operations that use them
+SensorsOnlyWhenMeasuring ==
+    sensor # "NONE" => \/ state \in {"MEASURE", "PLOT", "CIRCULATE"}
+                       \/ state = "ADJUST_PH" /\ phSub \in {"PH_MEASURE", "PH_CIRCULATE"}
+                       \/ state \in {"ADJUST_TDS", "ADJUST_ALL"}
+                          /\ tdsSub \in {"TDS_MEASURE", "TDS_CIRCULATE"}
+
+\* Every operation ends
+OperationsFinish == (state # "IDLE") ~> (state = "IDLE")
 
 =============================================================================

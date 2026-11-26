@@ -1,43 +1,57 @@
 # TLA+ model of the firmware state machine
 
-`NutrientMixer.tla` models the control logic of `../nutrient_mixer.ino`:
-the top-level `State` in `loop()`, the `pHadjustment()` and `TDSadjustment()`
-sub-machines, their round counters, the shared `runCountDown()` timer and
-which pumps are energised.
+`NutrientMixer.tla` models the control logic of `../nutrient_mixer.ino`: the
+operation `state` in `loop()`, the `phAdjustment()` and `tdsAdjustment()`
+sub-machines and their round counters, the shared `countDown` timer, which
+sensor is powered, the `measureAll()` step and which pumps are requested.
 
-Each `loop()` iteration is two steps: `pc = "read"` applies an incoming
-command (`switch (command)`), and `pc = "exec"` runs one slice of work
-(`switch (state)`). Timer expiry and sensor results are nondeterministic,
-so TLC explores every ordering.
+Each `loop()` iteration is two steps: `pc = "read"` applies at most one
+command (serial, menu or abort switch) through `handleCommand()`, and
+`pc = "exec"` runs one slice of the current operation. Timer expiry, sensor
+warm-up and sensor results are nondeterministic, so TLC explores every
+ordering. Targets, durations, calibration, WiFi and the display are left
+out. The float switches are not modelled: they only gate the relays in
+`updatePumps()`, so `pumps` is what the firmware has requested.
 
-| Config | Purpose |
+## Checked properties (`MC.cfg`)
+
+| Property | Meaning |
 | --- | --- |
-| `MC_graph.cfg` | Intended behaviour: commands only when IDLE, `!` anytime. Used to draw the diagrams. |
-| `MC_firmware.cfg` | Faithful to the code: commands are applied even while busy. Checks safety invariants. |
-| `MC_boot.cfg` | Checks the pump state that `setup()` leaves behind. |
+| `IdleMeansPumpsOff` | Back in IDLE, no pump is requested. |
+| `IdleMeansTimerFree` | The shared countdown is not left running in IDLE. |
+| `IdleMeansSensorsOff` | Both sensors are powered down in IDLE. |
+| `AcidOnlyWhenDosing`, `NutrientAOnlyWhenDosing`, `NutrientBOnlyWhenDosing` | A dosing pump only runs in its own dosing state. |
+| `OneDosingPumpAtATime` | Never more than one peristaltic pump at once. |
+| `NoDosingWhileCirculating` | No dosing while the tank circulates. |
+| `SensorsOnlyWhenMeasuring` | A sensor is only powered by an operation that reads it. |
+| `OperationsFinish` | Every operation returns to IDLE (liveness, assuming time passes and readings complete). |
 
-## Regenerate the diagrams
+All hold: 1,092 distinct states, no deadlocks.
+
+The model was checked against reintroduced bugs to make sure the properties
+can fail. Accepting commands while busy, not cancelling the timer on abort,
+removing the round limit and dropping the progress assumption each produce a
+counterexample. Removing `cancelCountDown()` from `startOperation()` does
+not: the busy check means it only runs with the timer already stopped, so
+that call is a safety net.
+
+## Run it
 
 ```bash
 curl -LO https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
 ```
 
 ```bash
-java -cp tla2tools.jar tlc2.TLC -config MC_graph.cfg -dump dot,actionlabels graph NutrientMixer.tla
+java -cp tla2tools.jar tlc2.TLC -config MC.cfg -dump dot,actionlabels graph NutrientMixer.tla
 ```
 
 ```bash
 python3 graph_to_mermaid.py graph.dot > diagrams.md
 ```
 
-## Check the invariants
-
-```bash
-java -cp tla2tools.jar tlc2.TLC -config MC_firmware.cfg NutrientMixer.tla
-```
-
 ## Diagrams
 
+Projected from the TLC state graph onto `state` and the adjustment sub-states.
 
 ### Top-level `loop()` state
 
@@ -45,29 +59,33 @@ java -cp tla2tools.jar tlc2.TLC -config MC_firmware.cfg NutrientMixer.tla
 stateDiagram-v2
     direction LR
     [*] --> IDLE
-    ABORT --> IDLE: pumps off + reboot
-    ADJUST_ALL --> ADJUST_PH: TDS in range
-    ADJUST_PH --> IDLE: in range or 6 rounds
-    ADJUST_TDS --> IDLE: in range or 6 rounds
-    CIRCULATE --> IDLE: timer expired
-    EMPTY --> IDLE: timer expired
-    FILL --> IDLE: timer expired
-    IDLE --> ABORT: !
-    IDLE --> ADJUST_ALL: a (adjust all)
-    IDLE --> ADJUST_PH: p (adjust pH)
-    IDLE --> ADJUST_TDS: t (adjust TDS)
+    ADJUST_ALL --> ADJUST_PH: TDS reached or 6 rounds
+    ADJUST_ALL --> IDLE: TDS unreadable
+    ADJUST_PH --> IDLE: reached, 6 rounds or unreadable
+    ADJUST_TDS --> IDLE: reached, 6 rounds or unreadable
+    CIRCULATE --> IDLE: time over
+    EMPTY --> IDLE: time over
+    FILL --> IDLE: time over
+    IDLE --> ADJUST_ALL: a / menu Adjust all
+    IDLE --> ADJUST_PH: p
+    IDLE --> ADJUST_TDS: t
     IDLE --> CIRCULATE: c / menu Circulate
     IDLE --> EMPTY: e / menu Empty
     IDLE --> FILL: f / menu Fill
-    IDLE --> MEASURE: m (measure)
-    IDLE --> PLOT: l (plot)
-    IDLE --> PUMP_NUTRIENT: n (pump nutrients)
-    IDLE --> PUMP_PH: u (pump acid)
-    MEASURE --> IDLE: readings printed
-    PLOT --> IDLE: timer expired
-    PUMP_NUTRIENT --> CIRCULATE: target 0 ⇒ done at once
-    PUMP_PH --> CIRCULATE: acid timer expired
-    note right of ABORT: '!' is accepted in every state
+    IDLE --> MEASURE: m / menu Measure
+    IDLE --> PLOT: l
+    IDLE --> PUMP_NUTRIENT_A: n / n a / menu Pump A
+    IDLE --> PUMP_NUTRIENT_B: n b / menu Pump B
+    IDLE --> PUMP_PH: u / menu Pump acid
+    MEASURE --> IDLE: TDS and pH read
+    PLOT --> IDLE: plot time over
+    PUMP_NUTRIENT_A --> CIRCULATE: dose done (n a)
+    PUMP_NUTRIENT_A --> PUMP_NUTRIENT_B: dose done (n)
+    PUMP_NUTRIENT_B --> CIRCULATE: dose done
+    PUMP_PH --> CIRCULATE: dose done
+    note left of IDLE
+        While busy, only ! (and ?, w) is accepted.<br/>Abort returns to IDLE from any state.
+    end note
 ```
 
 ### `pHadjustment()` sub-machine
@@ -76,10 +94,11 @@ stateDiagram-v2
 stateDiagram-v2
     state "ADJUST_PH" as SUB {
     [*] --> PH_MEASURE
-    PH_CIRCULATE --> PH_MEASURE: circulation timer expired
-    PH_MEASURE --> PH_PUMP: pH above target, round < 6
-    PH_PUMP --> PH_CIRCULATE: acid timer expired
-    PH_MEASURE --> [*]: in range or round > 5
+    PH_CIRCULATE --> PH_SETTLE: circulation time over
+    PH_MEASURE --> PH_PUMP: pH too high, round < 6
+    PH_PUMP --> PH_CIRCULATE: acid dose done
+    PH_SETTLE --> PH_MEASURE: settle time over
+    PH_MEASURE --> [*]: reached, 6 rounds or unreadable
     }
     note right of SUB
         on exit: ADJUST_PH → IDLE
@@ -90,35 +109,16 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    state "ADJUST_TDS / ADJUST_ALL / PUMP_NUTRIENT" as SUB {
+    state "ADJUST_TDS / ADJUST_ALL" as SUB {
     [*] --> TDS_MEASURE
-    TDS_A_PUMP --> TDS_B_PUMP: nutrient A timer expired
-    TDS_B_PUMP --> TDS_CIRCULATE: nutrient B timer expired
-    TDS_CIRCULATE --> TDS_MEASURE: circulation timer expired
-    TDS_MEASURE --> TDS_A_PUMP: TDS below target, round < 6
-    TDS_MEASURE --> [*]: in range or round > 5
+    TDS_A_PUMP --> TDS_B_PUMP: A dose done
+    TDS_B_PUMP --> TDS_CIRCULATE: B dose done
+    TDS_CIRCULATE --> TDS_SETTLE: circulation time over
+    TDS_MEASURE --> TDS_A_PUMP: TDS too low, round < 6
+    TDS_SETTLE --> TDS_MEASURE: settle time over
+    TDS_MEASURE --> [*]: reached, 6 rounds or unreadable
     }
     note right of SUB
-        on exit: ADJUST_ALL → ADJUST_PH<br/>ADJUST_TDS → IDLE<br/>PUMP_NUTRIENT → CIRCULATE
+        on exit: ADJUST_ALL → ADJUST_PH<br/>ADJUST_ALL → IDLE<br/>ADJUST_TDS → IDLE
     end note
 ```
-
-## What TLC found (`MC_firmware.cfg`, `MC_boot.cfg`)
-
-1. **A command sent mid-operation leaves pumps running.** `loop()` prints
-   "Operation in progress" but still applies the command. Trace: `e` (output
-   pump on, timer armed), then `t`: `TDSadjustment()` finishes at once and the
-   machine is IDLE with the output pump still on. Violates `IdleMeansPumpsOff`.
-2. **The shared countdown leaks between operations.** `runCountDown()` keeps
-   one `static` timer for every caller. In the same trace it stays armed in
-   IDLE (`IdleMeansCountdownFree`), so the next timed operation skips its
-   `start()` callback and only runs `stop()`.
-3. **Acid pump can keep dosing outside a dosing state.** `u` then `t`
-   leaves the acid pump on in `ADJUST_TDS` (`AcidOnlyWhenDosing`).
-4. **Relays are on at boot.** `setup()` writes HIGH to both relay pins, which
-   `engagePump()` treats as "pumping" (`MC_boot.cfg`). GPIO 38/39 are also
-   input-only on the ESP32, as the TODO at the top of the sketch suspects.
-5. **`n` never pumps nutrients.** `PUMP_NUTRIENT` calls `TDSadjustment()`
-   with its default target 0, which returns done from `TDS_MEASURE`, so the
-   machine goes straight to `CIRCULATE`. It only doses if an interrupted TDS
-   adjustment left the sub-machine mid-cycle.

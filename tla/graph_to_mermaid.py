@@ -18,10 +18,11 @@ EDGE = re.compile(r'^(-?\d+) -> (-?\d+) \[label="((?:[^"\\]|\\.)*)"')
 VAR = re.compile(r'/\\\\ (\w+) = (.*?)(?:\\n|$)')
 
 COMMANDS = {
-    "t": "t (adjust TDS)", "p": "p (adjust pH)", "a": "a (adjust all)",
+    "t": "t", "p": "p", "a": "a / menu Adjust all",
     "e": "e / menu Empty", "f": "f / menu Fill", "c": "c / menu Circulate",
-    "n": "n (pump nutrients)", "u": "u (pump acid)", "m": "m (measure)",
-    "l": "l (plot)",
+    "n": "n", "na": "n a / menu Pump A", "nb": "n b / menu Pump B",
+    "u": "u / menu Pump acid", "m": "m / menu Measure", "l": "l",
+    "!": "! / menu Abort / abort switch",
 }
 
 
@@ -40,25 +41,28 @@ def parse(path):
     return nodes, edges
 
 
-def top_label(action, src, dst, s):
-    m = re.match(r'Receive\("(.)"\)', action)
+TOP_LABELS = {
+    ("ADJUST_ALL", "ADJUST_PH"): "TDS reached or 6 rounds",
+    ("ADJUST_ALL", "IDLE"): "TDS unreadable",
+    ("ADJUST_TDS", "IDLE"): "reached, 6 rounds or unreadable",
+    ("ADJUST_PH", "IDLE"): "reached, 6 rounds or unreadable",
+    ("PUMP_NUTRIENT_A", "PUMP_NUTRIENT_B"): "dose done (n)",
+    ("PUMP_NUTRIENT_A", "CIRCULATE"): "dose done (n a)",
+    ("PUMP_NUTRIENT_B", "CIRCULATE"): "dose done",
+    ("PUMP_PH", "CIRCULATE"): "dose done",
+    ("MEASURE", "IDLE"): "TDS and pH read",
+    ("PLOT", "IDLE"): "plot time over",
+    ("CIRCULATE", "IDLE"): "time over",
+    ("EMPTY", "IDLE"): "time over",
+    ("FILL", "IDLE"): "time over",
+}
+
+
+def top_label(action, src, dst):
+    m = re.match(r'Receive\("(.+?)"\)', action)
     if m:
         return COMMANDS.get(m.group(1), m.group(1))
-    if src == "ADJUST_ALL" and dst == "ADJUST_PH":
-        return "TDS in range"
-    if src == "PUMP_PH":
-        return "acid timer expired"
-    if src == "PUMP_NUTRIENT":
-        return "target 0 ⇒ done at once"
-    if src in ("ADJUST_PH", "ADJUST_TDS", "ADJUST_ALL"):
-        return "in range or 6 rounds"
-    if src == "MEASURE":
-        return "readings printed"
-    if src in ("CIRCULATE", "EMPTY", "FILL", "PLOT"):
-        return "timer expired"
-    if src == "ABORT":
-        return "pumps off + reboot"
-    return action
+    return TOP_LABELS.get((src, dst), action)
 
 
 def top_level(nodes, edges):
@@ -67,22 +71,24 @@ def top_level(nodes, edges):
         sa, sb = nodes[a]["state"], nodes[b]["state"]
         if sa == sb or (act == 'Receive("!")' and sa != "IDLE"):
             continue  # abort-from-anywhere is drawn once, as a note
-        labels[(sa, sb)].add(top_label(act, sa, sb, nodes[a]))
+        labels[(sa, sb)].add(top_label(act, sa, sb))
     out = ["stateDiagram-v2", "    direction LR", "    [*] --> IDLE"]
     for (a, b), ls in sorted(labels.items()):
         out.append(f"    {a} --> {b}: {' / '.join(sorted(ls))}")
-    out.append("    note right of ABORT: '!' is accepted in every state")
+    out.append("    note left of IDLE\n        While busy, only ! (and ?, w) is accepted.<br/>Abort returns to IDLE from any state.\n    end note")
     return "\n".join(out)
 
 
 SUB_LABELS = {
-    ("PH_MEASURE", "PH_PUMP"): "pH above target, round < 6",
-    ("PH_PUMP", "PH_CIRCULATE"): "acid timer expired",
-    ("PH_CIRCULATE", "PH_MEASURE"): "circulation timer expired",
-    ("TDS_MEASURE", "TDS_A_PUMP"): "TDS below target, round < 6",
-    ("TDS_A_PUMP", "TDS_B_PUMP"): "nutrient A timer expired",
-    ("TDS_B_PUMP", "TDS_CIRCULATE"): "nutrient B timer expired",
-    ("TDS_CIRCULATE", "TDS_MEASURE"): "circulation timer expired",
+    ("PH_MEASURE", "PH_PUMP"): "pH too high, round < 6",
+    ("PH_PUMP", "PH_CIRCULATE"): "acid dose done",
+    ("PH_CIRCULATE", "PH_SETTLE"): "circulation time over",
+    ("PH_SETTLE", "PH_MEASURE"): "settle time over",
+    ("TDS_MEASURE", "TDS_A_PUMP"): "TDS too low, round < 6",
+    ("TDS_A_PUMP", "TDS_B_PUMP"): "A dose done",
+    ("TDS_B_PUMP", "TDS_CIRCULATE"): "B dose done",
+    ("TDS_CIRCULATE", "TDS_SETTLE"): "circulation time over",
+    ("TDS_SETTLE", "TDS_MEASURE"): "settle time over",
 }
 
 
@@ -92,7 +98,7 @@ def sub_machine(nodes, edges, top_states, sub_var, title):
         na, nb = nodes[a], nodes[b]
         if na["state"] not in top_states or act.startswith("Receive") or act == "NoInput":
             continue
-        if nb["state"] != na["state"] and nb["state"] != "ABORT":
+        if nb["state"] != na["state"]:
             exits[na[sub_var]].add(f"{na['state']} → {nb['state']}")
         elif na[sub_var] != nb[sub_var]:
             trans.add((na[sub_var], nb[sub_var]))
@@ -101,7 +107,7 @@ def sub_machine(nodes, edges, top_states, sub_var, title):
     for a, b in sorted(trans):
         out.append(f"    {a} --> {b}: {SUB_LABELS.get((a, b), '')}")
     for s in sorted(exits):
-        out.append(f"    {s} --> [*]: in range or round > 5")
+        out.append(f"    {s} --> [*]: reached, 6 rounds or unreadable")
     out.append("    }")
     all_exits = sorted(set().union(*exits.values()))
     out.append(f"    note right of SUB\n        on exit: {'<br/>'.join(all_exits)}\n    end note")
@@ -116,8 +122,8 @@ def main():
         ("`pHadjustment()` sub-machine",
          sub_machine(nodes, edges, {"ADJUST_PH"}, "phSub", "ADJUST_PH")),
         ("`TDSadjustment()` sub-machine",
-         sub_machine(nodes, edges, {"ADJUST_TDS", "ADJUST_ALL", "PUMP_NUTRIENT"},
-                     "tdsSub", "ADJUST_TDS / ADJUST_ALL / PUMP_NUTRIENT")),
+         sub_machine(nodes, edges, {"ADJUST_TDS", "ADJUST_ALL"},
+                     "tdsSub", "ADJUST_TDS / ADJUST_ALL")),
     ]:
         print(f"\n### {name}\n\n```mermaid\n{body}\n```")
 
