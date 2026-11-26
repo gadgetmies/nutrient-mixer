@@ -1,0 +1,4 @@
+NutrientMixer_TTrace_*
+states/
+*.dot
+tla2tools.jar
