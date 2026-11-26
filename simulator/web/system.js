@@ -312,8 +312,11 @@ export class SystemDiagram {
     const g = el('g', { transform: `translate(${x},${y})` }, parent);
     el('rect', { x: 0, y: 0, width: 260, height: 150, rx: 6, fill: '#14532f', stroke: '#0b3a20' }, g);
     // T-Display (live screen)
+    // T-Display: USB-C end on the left, the 240 x 135 screen (16:9) inside the board on the right
     el('rect', { x: 46, y: 14, width: 168, height: 82, rx: 4, fill: '#111316' }, g);
-    this.screenImage = el('image', { x: 62, y: 22, width: 136, height: 76.5, preserveAspectRatio: 'none', style: 'image-rendering:pixelated' }, g);
+    el('rect', { x: 42, y: 47, width: 8, height: 16, rx: 2, fill: '#9ea3a8' }, g);
+    el('rect', { x: 76, y: 19, width: 128, height: 72, fill: '#000' }, g);
+    this.screenImage = el('image', { x: 76, y: 19, width: 128, height: 72, preserveAspectRatio: 'none', 'image-rendering': 'optimizeSpeed', style: 'image-rendering:pixelated' }, g);
     // Debug LEDs D4..D9 (shift register outputs) and LED1..3
     this.boardLeds = {};
     const leds = [['D4', 'P1'], ['D5', 'P2'], ['D6', 'P3'], ['D7', 'P4'], ['D8', 'A'], ['D9', 'B'], ['LED1', 'ERR'], ['LED3', 'pH'], ['LED2', 'TDS']];

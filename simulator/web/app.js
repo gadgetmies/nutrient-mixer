@@ -75,7 +75,7 @@ function updateScreenImages() {
   if (frontPanel.screenVersion === screenVersion || now - screenCopiedAt < 250) return;
   screenVersion = frontPanel.screenVersion;
   screenCopiedAt = now;
-  const url = frontPanel.backlight ? frontPanel.screen.toDataURL() : '';
+  const url = frontPanel.backlight ? frontPanel.screenUrl : '';
   system.setScreen(url);
   board.setScreen(url);
 }

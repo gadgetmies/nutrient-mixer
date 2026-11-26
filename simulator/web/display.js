@@ -22,6 +22,14 @@ export class FrontPanel {
     this.screen.height = 135;
     this.screenContext = this.screen.getContext('2d');
     this.image = this.screenContext.createImageData(240, 135);
+    // Enlarged copy (nearest neighbour) that the SVG shows as an image. HTML inside SVG (foreignObject) is
+    // positioned and scaled wrongly by Safari, so the display is an SVG image instead.
+    this.scaled = document.createElement('canvas');
+    this.scaled.width = 720;
+    this.scaled.height = 405;
+    this.scaledContext = this.scaled.getContext('2d');
+    this.scaledContext.imageSmoothingEnabled = false;
+    this.screenUrl = '';
     this.backlight = false;
     this.screenVersion = 0;
 
@@ -76,12 +84,8 @@ export class FrontPanel {
     // Screen: glass, then the 240 x 135 active area
     svgElement('rect', { x: 92, y: 40, width: 452, height: 220, rx: 6, fill: '#050607', stroke: '#26292c' }, td);
     // Active area at 1.5 times the panel resolution
-    const foreign = svgElement('foreignObject', { x: 138, y: 49, width: 360, height: 202.5 }, td);
-    this.screen.style.cssText = 'width:100%;height:100%;image-rendering:pixelated;display:block;background:#000';
-    const holder = document.createElement('div');
-    holder.style.cssText = 'width:100%;height:100%;';
-    holder.appendChild(this.screen);
-    foreign.appendChild(holder);
+    svgElement('rect', { x: 138, y: 49, width: 360, height: 202.5, fill: '#000' }, td);
+    this.screenImage = svgElement('image', { x: 138, y: 49, width: 360, height: 202.5, preserveAspectRatio: 'none', 'image-rendering': 'optimizeSpeed', style: 'image-rendering:pixelated' }, td);
     this.screenOff = svgElement('rect', { x: 138, y: 49, width: 360, height: 202.5, fill: '#000', opacity: 0 }, td);
 
     // ROTARY ENCODER (SW1, EC12E with push switch)
@@ -261,6 +265,9 @@ export class FrontPanel {
       }
     }
     this.screenContext.putImageData(this.image, 0, 0);
+    this.scaledContext.drawImage(this.screen, 0, 0, this.scaled.width, this.scaled.height);
+    this.screenUrl = this.scaled.toDataURL();
+    this.screenImage.setAttribute('href', this.screenUrl);
     this.screenVersion++;
   }
 
